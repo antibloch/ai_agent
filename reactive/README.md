@@ -18,4 +18,6 @@ pip install pyowm
 pip install -U langchain-google-genai
 
 pip install geopy
+
+pip install -U mcp langchain-mcp-adapters
 ```
