@@ -61,8 +61,8 @@ def main():
 
     system_prompt = (
         "You are a tool-using AI assistant.\n"
-        "Use PythonREPLTool for any computation.\n"
-        "Use build_serpapi_search_tool for any web/current info.\n"
+        "Use `PythonREPLTool` for any computation.\n"
+        "Use `web_search` for any web/current info.\n"
         "If you did not call a tool, DO NOT claim you did.\n"
         "Be concise and correct."
     )
