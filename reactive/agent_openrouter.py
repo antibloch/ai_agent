@@ -10,6 +10,8 @@ from langchain_experimental.tools import PythonREPLTool
 from langchain_openai import ChatOpenAI  # tool-calling capable
 
 os.environ["USER_AGENT"] = "my-langchain-agent/1.0"
+os.environ["OPENAI_API_KEY"] = os.environ["OPENROUTER_API_KEY"]  # or set directly
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 # export OPENAI_API_KEY=...
 
 def build_tools():
@@ -28,8 +30,9 @@ def main():
     # )
 
     model = ChatOpenAI(
-        model="gpt-4o-mini",
+        model="nvidia/nemotron-3-nano-30b-a3b:free",
         temperature=0.0,
+        base_url=OPENROUTER_BASE_URL,
     )
 
     system_prompt = (
@@ -58,6 +61,7 @@ def main():
 
     # result is an AgentState-like dict; final messages contain the answer
     final_msg = result["messages"][-1]
+    print("..................................")
     print(final_msg.content)
 
 if __name__ == "__main__":
