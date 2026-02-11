@@ -22,6 +22,11 @@ def build_tools():
 def main():
     tools = build_tools()
 
+    # model = ChatOpenAI(
+    #     model="gpt-4o-mini",
+    #     temperature=0.0,
+    # )
+
     model = ChatOpenAI(
         model="gpt-4o-mini",
         temperature=0.0,
@@ -37,10 +42,11 @@ def main():
     agent = create_agent(
         model=model,
         tools=tools,
-        prompt=system_prompt,   # system prompt string
+        system_prompt=system_prompt,
         debug=True,
         name="python_search_agent",
-    )
+        )
+
 
     query = (
         "Compute (5+3)*2 using python, then search the web for "
