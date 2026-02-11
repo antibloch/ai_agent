@@ -14,4 +14,6 @@ pip install -U ddgs
 pip install google-search-results
 
 pip install pyowm
+
+pip install -U langchain-google-genai
 ```
