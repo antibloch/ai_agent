@@ -20,4 +20,6 @@ pip install -U langchain-google-genai
 pip install geopy
 
 pip install -U mcp langchain-mcp-adapters
+
+pip install pymongo
 ```
