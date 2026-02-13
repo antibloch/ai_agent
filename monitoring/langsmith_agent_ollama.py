@@ -1,0 +1,62 @@
+import os
+from typing import Any, Dict
+
+from langchain.agents import create_agent
+from langchain_core.messages import HumanMessage
+
+from langchain_community.tools import DuckDuckGoSearchRun
+from langchain_experimental.tools import PythonREPLTool
+from langchain_ollama import ChatOllama
+
+
+os.environ["USER_AGENT"] = "my-langchain-agent/1.0"
+
+
+def build_tools():
+    return [DuckDuckGoSearchRun(), PythonREPLTool()]
+
+
+def main():
+    tools = build_tools()
+
+    model = ChatOllama(
+        model="qc:latest",
+        temperature=0,
+        # base_url="http://localhost:11434",
+    )
+
+    system_prompt = (
+        "You are a tool-using AI assistant.\n"
+        "Use PythonREPLTool for any computation.\n"
+        "Use DuckDuckGoSearchRun for any web/current info.\n"
+        "If you did not call a tool, DO NOT claim you did.\n"
+        "Be concise and correct."
+    )
+
+    agent = create_agent(
+        model=model,
+        tools=tools,
+        system_prompt=system_prompt,
+    )
+
+    query = (
+        "Compute pi upto 13 decimal places using python, "
+        "then search the web for 'latest Elon Musk's net worth' "
+        "and summarize in 1 line."
+    )
+
+    # IMPORTANT: pass LangChain "config" so LangSmith run is nicely labeled
+    result: Dict[str, Any] = agent.invoke(
+        {"messages": [HumanMessage(content=query)]},
+        config={
+            "run_name": "ollama-react-agent",
+            "tags": ["ollama", "react", "tools", "dev"],
+            "metadata": {"model": "qc:latest"},
+        },
+    )
+
+    print(result["messages"][-1].content)
+
+
+if __name__ == "__main__":
+    main()

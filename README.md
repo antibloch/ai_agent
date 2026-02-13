@@ -24,4 +24,6 @@ pip install -U mcp langchain-mcp-adapters
 pip install pymongo
 
 pip install maxim-py
+
+pip install -U langsmith
 ```
