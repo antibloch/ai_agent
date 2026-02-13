@@ -16,8 +16,12 @@ from langgraph.graph import StateGraph, END
 from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_experimental.tools import PythonREPLTool
 from langchain_ollama import ChatOllama
+import re
 
-os.environ["USER_AGENT"] = "my-langchain-agent/1.0"
+_CORRECT_RE = re.compile(r"^\s*CORRECT\s*[\.\!\u2705✅]*\s*$", re.IGNORECASE)
+
+def is_critique_correct(critique: str) -> bool:
+    return bool(_CORRECT_RE.match(critique or ""))
 
 
 # ----------------------------
@@ -223,7 +227,10 @@ def should_retry(state: AgentState):
     attempt = int(state.get("attempt", 1))
     max_attempts = int(state.get("max_attempts", 2))
 
-    if critique == "CORRECT.":
+    # if critique == "CORRECT.":
+    #     return "end"
+
+    if is_critique_correct(critique):
         return "end"
 
     if attempt >= max_attempts:
