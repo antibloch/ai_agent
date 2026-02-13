@@ -42,7 +42,6 @@ def build_node_stats_tool():
 
 
 
-
 def build_tools():
     return [
         build_node_stats_tool(),  # <-- new tool
