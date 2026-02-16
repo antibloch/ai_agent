@@ -38,10 +38,17 @@ def main():
         system_prompt=system_prompt,  # NOTE: v1 uses system_prompt (not prompt)
     )
 
+    # query = (
+    #     "Compute pi upto 13 decimal places using python, "
+    #     "then search the web for 'latest Elon Musk's net worth' "
+    #     "and summarize in 1 line."
+    # )
+
     query = (
         "Compute pi upto 13 decimal places using python, "
-        "then search the web for 'latest Elon Musk's net worth' "
-        "and summarize in 1 line."
+        "then find out about 'Elon Musk's residence' "
+        "and then find the latest news at Elon Musk's residence, "
+        "and summarize all this in 1 line."
     )
 
     result: Dict[str, Any] = agent.invoke({"messages": [HumanMessage(content=query)]})
