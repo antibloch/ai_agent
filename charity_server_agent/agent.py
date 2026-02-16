@@ -108,17 +108,33 @@ def build_node_stats_tool():
         except requests.RequestException as e:
             return json.dumps({"ok": False, "error": str(e), "tool": normalized})
 
+    # return Tool(
+    #     name="get_charity_stats",
+    #     description=(
+    #         "Fetch internal charity data from the Node.js service.\n"
+    #         "Input MUST be exactly one tool name or alias (no natural language).\n"
+    #         f"Canonical tools: {', '.join(CANONICAL_TOOLS)}.\n"
+    #         f"Aliases accepted: {', '.join(sorted(ALIASES.keys()))}.\n"
+    #         "Returns JSON envelope: {ok, tool, query, data, meta}."
+    #     ),
+    #     func=call_node_stats,
+    # )
+
     return Tool(
-        name="get_charity_stats",
-        description=(
-            "Fetch internal charity data from the Node.js service.\n"
-            "Input MUST be exactly one tool name or alias (no natural language).\n"
-            f"Canonical tools: {', '.join(CANONICAL_TOOLS)}.\n"
-            f"Aliases accepted: {', '.join(sorted(ALIASES.keys()))}.\n"
-            "Returns JSON envelope: {ok, tool, query, data, meta}."
-        ),
-        func=call_node_stats,
-    )
+    name="get_charity_stats",
+    description=(
+        "Fetch internal charity data from Node.\n"
+        "Input MUST be EXACTLY one tool name.\n"
+        "Common calls:\n"
+        "- 'charity_address' => lists all charities + their addresses (use this to list charities)\n"
+        "- 'chairty_contact_info' => lists all charities + contact info\n"
+        "- 'charity_donor_count' => donor counts per charity\n"
+        "- 'charity_impactlife' => impactLife per charity\n"
+        "Returns JSON: {ok, tool, query, data, meta}."
+    ),
+    func=call_node_stats,
+)
+
 
 
 
@@ -158,14 +174,40 @@ model = ChatOllama(
 # ----------------------------
 # 4) Defining system prompt
 # ----------------------------
+# SYSTEM_PROMPT = SystemMessage(
+#     content=(
+#         "You are a tool-using AI assistant.\n"
+#         "Use build_node_stats_tool for any info related to charities.\n"
+#         "If you did not call a tool, DO NOT claim you did.\n"
+#         "Be concise and correct."
+#     )
+# )
 SYSTEM_PROMPT = SystemMessage(
     content=(
         "You are a tool-using AI assistant.\n"
-        "Use build_node_stats_tool for any info related to charities.\n"
-        "If you did not call a tool, DO NOT claim you did.\n"
-        "Be concise and correct."
+        "\n"
+        "General operating rules:\n"
+        "1) If the user request is short, ambiguous, or underspecified, DO NOT refuse.\n"
+        "   First, rewrite the user request into a more explicit version that makes the goal measurable.\n"
+        "   Then proceed.\n"
+        "2) Always ground factual claims in tool outputs when tools are available.\n"
+        "   If you did not call a tool, DO NOT claim you did.\n"
+        "3) Tool routing policy (robust to ambiguity):\n"
+        "   a) Infer the user's intent (e.g., list, compare, rank, summarize, fetch details).\n"
+        "   b) Select the SINGLE most relevant tool call that is likely to return a superset of needed data.\n"
+        "      Prefer broad/overview tools over narrow ones when uncertain.\n"
+        "   c) If multiple tools are needed, call the minimum number.\n"
+        "   d) If tool inputs must be chosen from a fixed set (tool-name router), choose the closest matching\n"
+        "      canonical tool name; if uncertain, choose the most general 'listing/overview' tool.\n"
+        "4) Clarification policy:\n"
+        "   If the request cannot be uniquely resolved, ask ONE targeted clarification question.\n"
+        "   But ALSO provide the best-effort answer using the most general tool available.\n"
+        "5) Output policy:\n"
+        "   Provide a direct answer first, then (if needed) a brief note about assumptions/limitations.\n"
+        "   Be concise.\n"
     )
 )
+
 
 
 
