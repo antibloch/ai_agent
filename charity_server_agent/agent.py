@@ -15,7 +15,9 @@ from langchain_experimental.tools import PythonREPLTool
 from langchain_ollama import ChatOllama
 
 
-
+# ----------------------------
+# 0) Define Tools
+# ----------------------------
 def build_node_stats_tool():
     BASE_URL = "http://localhost:3000"
 
@@ -133,13 +135,13 @@ def build_node_stats_tool():
         "Returns JSON: {ok, tool, query, data, meta}."
     ),
     func=call_node_stats,
-)
+    )
 
 
 
 
 # ----------------------------
-# 1) Tools + model
+# 1) Build Tools
 # ----------------------------
 def build_tools():
     # Both are "single input" tools
@@ -322,7 +324,7 @@ def main():
         "Find me all available charities, "
         # " Which charities have the highest donor count, "
         # "and then find the latest news at Elon Musk's residence, "
-        "and summarize all this in 1 line."
+        # "and summarize all this in 1 line."
     )
 
     inputs = {"messages": [HumanMessage(content=query)]}
