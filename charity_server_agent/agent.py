@@ -138,12 +138,15 @@ tools_by_name = {t.name: t for t in tools}
 
 
 # ----------------------------
-# 1) Graph state
+# 2) Graph state
 # ----------------------------
 class AgentState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], add_messages]
 
 
+# --------------------------------------------
+# 3) Defining model as base of LLM agent
+# --------------------------------------------
 model = ChatOllama(
     model="qc:latest",
     temperature=0,
@@ -152,7 +155,9 @@ model = ChatOllama(
 
 
 
-
+# ----------------------------
+# 4) Defining system prompt
+# ----------------------------
 SYSTEM_PROMPT = SystemMessage(
     content=(
         "You are a tool-using AI assistant.\n"
@@ -165,7 +170,7 @@ SYSTEM_PROMPT = SystemMessage(
 
 
 # ----------------------------
-# 3) Nodes
+# 5) Nodes
 # ----------------------------
 def _normalize_tool_args(args: Any):
     """
@@ -241,7 +246,7 @@ def call_model(state: AgentState, config: RunnableConfig):
 
 
 # ----------------------------
-# 4) Control flow (edges)
+# 6) Control flow (edges)
 # ----------------------------
 def should_continue(state: AgentState):
     last = state["messages"][-1]
@@ -265,20 +270,15 @@ def build_graph():
 
 
 # ----------------------------
-# 5) Run
+# 7) Run
 # ----------------------------
 def main():
     graph = build_graph()
 
-    # query = (
-    #     "Compute pi upto 13 decimal places using python, "
-    #     "then search the web for 'latest Elon Musk net worth' "
-    #     "and summarize in 1 line."
-    # )
 
     query = (
-        "Find me info of all available charities, "
-        # "then find out about 'Elon Musk's residence' "
+        "Find me all available charities, "
+        # " Which charities have the highest donor count, "
         # "and then find the latest news at Elon Musk's residence, "
         "and summarize all this in 1 line."
     )
