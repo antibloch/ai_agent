@@ -31,6 +31,8 @@ pip install "fastapi[all]"
 
 pip install "uvicorn[standard]"
 
+pip install rich
+
 ```
 
 
