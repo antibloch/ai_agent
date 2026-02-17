@@ -214,7 +214,8 @@ def build_node_stats_tool():
             "8. charity_address: Physical locations and HQ details (Good for listing charities).\n"
             "9. charity_country_availability: Where these charities operate.\n"
             "10. chairty_contact_info: Emails, phones, and websites (Use this exact spelling).\n"
-            "Returns JSON: {ok, tool, query, data, meta}."
+            "\nReturns JSON: {ok, tool, query, data, meta}.\n"
+            "'data' field contains the actual response from the Node server for the given tool query."
         ),
         func=call_node_stats,
     )
