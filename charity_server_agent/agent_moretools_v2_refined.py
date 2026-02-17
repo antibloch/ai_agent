@@ -284,7 +284,7 @@ async def main():
         "Find me all available charities, "
         " Which charities have the highest donor count, "
         " What are the mean and median of donor counts across charities, please calculate using python if needed, "
-        " List all of the charities's contact info "
+        " Provide info about charities from their websites "
         # " and summarize all this in 1 line."
     )
 
