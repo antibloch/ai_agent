@@ -1,5 +1,7 @@
 import json
 import requests
+from rich.console import Console
+from rich.markdown import Markdown
 from rich import print
 import os
 import asyncio
