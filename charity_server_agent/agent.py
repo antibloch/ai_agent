@@ -18,10 +18,135 @@ from langchain_ollama import ChatOllama
 # ----------------------------
 # 0) Define Tools
 # ----------------------------
+# def build_node_stats_tool():
+#     BASE_URL = "http://localhost:3000"
+
+#     # Canonical tool names (the ones returned in payload.tool)
+#     CANONICAL_TOOLS = [
+#         "charity_donor_count",
+#         "charity_impactlife",
+#         "charity_donor_amount",
+#         "charity_total_donation",
+#         "charity_items_category",
+#         "charity_product_price_description",
+#         "charity_blogs",
+#         "charity_address",
+#         "charity_country_availability",
+#         "chairty_contact_info",  # NOTE: typo-canonical in your toolMap
+#     ]
+
+#     # Aliases supported by your Node router (handleToolQuery.toolMap)
+#     # We normalize these to canonical names for stricter behavior.
+#     ALIASES = {
+#         "donor_count": "charity_donor_count",
+#         "donors_count": "charity_donor_count",
+
+#         "impactlife": "charity_impactlife",
+#         "impact_life": "charity_impactlife",
+
+#         "donor_amount": "charity_donor_amount",
+#         "donation_amount": "charity_donor_amount",
+
+#         "total_donation": "charity_total_donation",
+#         "product_total_donation": "charity_total_donation",
+
+#         "items_category": "charity_items_category",
+#         "product_categories": "charity_items_category",
+
+#         "product_price_description": "charity_product_price_description",
+#         "products_info": "charity_product_price_description",
+
+#         "blogs": "charity_blogs",
+
+#         "address": "charity_address",
+
+#         "country_availability": "charity_country_availability",
+
+#         "charity_contact_info": "chairty_contact_info",  # both map to the same handler
+#         "contact_info": "chairty_contact_info",
+#     }
+
+#     # The full set we allow as input to THIS Python tool
+#     VALID_INPUTS = sorted(set(CANONICAL_TOOLS) | set(ALIASES.keys()))
+
+#     def call_node_stats(tool_name: str) -> str:
+#         """
+#         Calls Node.js GET /api/stats?q=<tool_or_alias>
+#         Returns JSON string.
+#         """
+#         raw = (tool_name or "").strip()
+#         if not raw:
+#             return json.dumps({
+#                 "ok": False,
+#                 "error": "Tool name is required (empty input).",
+#                 "valid_tools": CANONICAL_TOOLS,
+#                 "valid_aliases": sorted(ALIASES.keys()),
+#             })
+
+#         # Normalize alias -> canonical (recommended)
+#         normalized = ALIASES.get(raw.lower(), raw)
+
+#         # Hard guard: keeps agent on-contract
+#         if normalized not in CANONICAL_TOOLS and raw.lower() not in ALIASES:
+#             return json.dumps({
+#                 "ok": False,
+#                 "error": "Invalid tool name for Node stats endpoint.",
+#                 "provided": raw,
+#                 "normalized": normalized,
+#                 "valid_inputs": VALID_INPUTS,
+#             })
+
+#         # IMPORTANT:
+#         # Your Node server accepts q as either canonical or alias.
+#         # We'll send the normalized canonical to keep things consistent.
+#         try:
+#             r = requests.get(
+#                 f"{BASE_URL}/api/stats",
+#                 params={"q": normalized},
+#                 timeout=5,
+#             )
+#             r.raise_for_status()
+#             return json.dumps(r.json())
+#         except requests.RequestException as e:
+#             return json.dumps({"ok": False, "error": str(e), "tool": normalized})
+
+#     # return Tool(
+#     #     name="get_charity_stats",
+#     #     description=(
+#     #         "Fetch internal charity data from the Node.js service.\n"
+#     #         "Input MUST be exactly one tool name or alias (no natural language).\n"
+#     #         f"Canonical tools: {', '.join(CANONICAL_TOOLS)}.\n"
+#     #         f"Aliases accepted: {', '.join(sorted(ALIASES.keys()))}.\n"
+#     #         "Returns JSON envelope: {ok, tool, query, data, meta}."
+#     #     ),
+#     #     func=call_node_stats,
+#     # )
+
+#     return Tool(
+#     name="get_charity_stats",
+#     description=(
+#         "Fetch internal charity data from Node-js server.\n"
+#         "Input MUST be EXACTLY one tool name.\n"
+#         "The input must be EXACTLY one of the following canonical tool names:\n"
+#         f"1. charity_donor_count: Number of unique donors per charity.\n"
+#         f"2. charity_impactlife: Human impact/lives touched metrics.\n"
+#         f"3. charity_donor_amount: Total currency amount donated.\n"
+#         f"4. charity_total_donation: Breakdown of product-specific donation counts.\n"
+#         f"5. charity_items_category: Categories of aid provided (e.g., Food, Health).\n"
+#         f"6. charity_product_price_description: Details on specific charity products/vouchers.\n"
+#         f"7. charity_blogs: Narrative updates and blog posts from the charities.\n"
+#         f"8. charity_address: Physical locations and HQ details (Good for listing charities).\n"
+#         f"9. charity_country_availability: Where these charities operate.\n"
+#         f"10. chairty_contact_info: Emails, phones, and websites (Note: Use this specific spelling).\n"
+#         "Returns JSON: {ok, tool, query, data, meta}."
+#     ),
+#     func=call_node_stats,
+#     )
+
 def build_node_stats_tool():
     BASE_URL = "http://localhost:3000"
 
-    # Canonical tool names (the ones returned in payload.tool)
+    # Canonical tool names (must match Node TOOL_REGISTRY keys exactly)
     CANONICAL_TOOLS = [
         "charity_donor_count",
         "charity_impactlife",
@@ -32,115 +157,66 @@ def build_node_stats_tool():
         "charity_blogs",
         "charity_address",
         "charity_country_availability",
-        "chairty_contact_info",  # NOTE: typo-canonical in your toolMap
+        "chairty_contact_info",  # NOTE: typo-canonical in your Node router
     ]
-
-    # Aliases supported by your Node router (handleToolQuery.toolMap)
-    # We normalize these to canonical names for stricter behavior.
-    ALIASES = {
-        "donor_count": "charity_donor_count",
-        "donors_count": "charity_donor_count",
-
-        "impactlife": "charity_impactlife",
-        "impact_life": "charity_impactlife",
-
-        "donor_amount": "charity_donor_amount",
-        "donation_amount": "charity_donor_amount",
-
-        "total_donation": "charity_total_donation",
-        "product_total_donation": "charity_total_donation",
-
-        "items_category": "charity_items_category",
-        "product_categories": "charity_items_category",
-
-        "product_price_description": "charity_product_price_description",
-        "products_info": "charity_product_price_description",
-
-        "blogs": "charity_blogs",
-
-        "address": "charity_address",
-
-        "country_availability": "charity_country_availability",
-
-        "charity_contact_info": "chairty_contact_info",  # both map to the same handler
-        "contact_info": "chairty_contact_info",
-    }
-
-    # The full set we allow as input to THIS Python tool
-    VALID_INPUTS = sorted(set(CANONICAL_TOOLS) | set(ALIASES.keys()))
 
     def call_node_stats(tool_name: str) -> str:
         """
-        Calls Node.js GET /api/stats?q=<tool_or_alias>
+        Calls Node.js GET /api/stats?q=<tool_name>
         Returns JSON string.
         """
-        raw = (tool_name or "").strip()
-        if not raw:
+        tool_name = (tool_name or "").strip()
+
+        if not tool_name:
             return json.dumps({
                 "ok": False,
                 "error": "Tool name is required (empty input).",
                 "valid_tools": CANONICAL_TOOLS,
-                "valid_aliases": sorted(ALIASES.keys()),
             })
 
-        # Normalize alias -> canonical (recommended)
-        normalized = ALIASES.get(raw.lower(), raw)
-
-        # Hard guard: keeps agent on-contract
-        if normalized not in CANONICAL_TOOLS and raw.lower() not in ALIASES:
+        # Strict contract enforcement (no aliases allowed)
+        if tool_name not in CANONICAL_TOOLS:
             return json.dumps({
                 "ok": False,
                 "error": "Invalid tool name for Node stats endpoint.",
-                "provided": raw,
-                "normalized": normalized,
-                "valid_inputs": VALID_INPUTS,
+                "provided": tool_name,
+                "valid_tools": CANONICAL_TOOLS,
             })
 
-        # IMPORTANT:
-        # Your Node server accepts q as either canonical or alias.
-        # We'll send the normalized canonical to keep things consistent.
         try:
             r = requests.get(
                 f"{BASE_URL}/api/stats",
-                params={"q": normalized},
+                params={"q": tool_name},
                 timeout=5,
             )
             r.raise_for_status()
             return json.dumps(r.json())
         except requests.RequestException as e:
-            return json.dumps({"ok": False, "error": str(e), "tool": normalized})
-
-    # return Tool(
-    #     name="get_charity_stats",
-    #     description=(
-    #         "Fetch internal charity data from the Node.js service.\n"
-    #         "Input MUST be exactly one tool name or alias (no natural language).\n"
-    #         f"Canonical tools: {', '.join(CANONICAL_TOOLS)}.\n"
-    #         f"Aliases accepted: {', '.join(sorted(ALIASES.keys()))}.\n"
-    #         "Returns JSON envelope: {ok, tool, query, data, meta}."
-    #     ),
-    #     func=call_node_stats,
-    # )
+            return json.dumps({
+                "ok": False,
+                "error": str(e),
+                "tool": tool_name,
+            })
 
     return Tool(
-    name="get_charity_stats",
-    description=(
-        "Fetch internal charity data from Node-js server.\n"
-        "Input MUST be EXACTLY one tool name.\n"
-        "The input must be EXACTLY one of the following canonical tool names:\n"
-        f"1. charity_donor_count: Number of unique donors per charity.\n"
-        f"2. charity_impactlife: Human impact/lives touched metrics.\n"
-        f"3. charity_donor_amount: Total currency amount donated.\n"
-        f"4. charity_total_donation: Breakdown of product-specific donation counts.\n"
-        f"5. charity_items_category: Categories of aid provided (e.g., Food, Health).\n"
-        f"6. charity_product_price_description: Details on specific charity products/vouchers.\n"
-        f"7. charity_blogs: Narrative updates and blog posts from the charities.\n"
-        f"8. charity_address: Physical locations and HQ details (Good for listing charities).\n"
-        f"9. charity_country_availability: Where these charities operate.\n"
-        f"10. chairty_contact_info: Emails, phones, and websites (Note: Use this specific spelling).\n"
-        "Returns JSON: {ok, tool, query, data, meta}."
-    ),
-    func=call_node_stats,
+        name="get_charity_stats",
+        description=(
+            "Fetch internal charity data from Node-js server.\n"
+            "Input MUST be EXACTLY one tool name.\n"
+            "The input must be EXACTLY one of the following canonical tool names:\n"
+            "1. charity_donor_count: Number of unique donors per charity.\n"
+            "2. charity_impactlife: Human impact/lives touched metrics.\n"
+            "3. charity_donor_amount: Total currency amount donated.\n"
+            "4. charity_total_donation: Breakdown of product-specific donation counts.\n"
+            "5. charity_items_category: Categories of aid provided (e.g., Food, Health).\n"
+            "6. charity_product_price_description: Details on specific charity products/vouchers.\n"
+            "7. charity_blogs: Narrative updates and blog posts from the charities.\n"
+            "8. charity_address: Physical locations and HQ details (Good for listing charities).\n"
+            "9. charity_country_availability: Where these charities operate.\n"
+            "10. chairty_contact_info: Emails, phones, and websites (Use this exact spelling).\n"
+            "Returns JSON: {ok, tool, query, data, meta}."
+        ),
+        func=call_node_stats,
     )
 
 
