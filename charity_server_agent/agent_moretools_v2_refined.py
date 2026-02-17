@@ -294,6 +294,8 @@ async def main():
     out_state = await graph.ainvoke(inputs)
     out_msg=out_state["messages"][-1].content
     console = Console()
+    print("\n\n")
+    print("-----------------------------------------------------------------------")
     console.print(Markdown(out_msg))
 
     # Option B: stream steps (uncomment to see tool/model turns)
