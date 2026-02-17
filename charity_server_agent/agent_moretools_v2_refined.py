@@ -295,6 +295,7 @@ async def main():
     out_msg=out_state["messages"][-1].content
     console = Console()
     print("\n\n")
+    print("Agent Final Response:")
     print("-----------------------------------------------------------------------")
     console.print(Markdown(out_msg))
 
