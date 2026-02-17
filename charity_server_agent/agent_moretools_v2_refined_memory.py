@@ -70,8 +70,9 @@ def textual_description_of_tools(tools) -> str:
 
 
 
-class AgentState(TypedDict):
+class AgentState(TypedDict, total=False):
     messages: Annotated[Sequence[BaseMessage], add_messages]
+    summary: str
 
 
 
@@ -270,8 +271,7 @@ def make_assistant_node(tools):
     tools_description = textual_description_of_tools(tools)
 
 
-    BASE_SYSTEM_PROMPT = SystemMessage(
-                        content=(
+    BASE_SYSTEM_PROMPT_TEXT = (
                             "You are a tool-using AI assistant.\n"
                             "\n"
                             "AVAILABLE TOOLS:\n" + tools_description +
@@ -302,7 +302,7 @@ def make_assistant_node(tools):
                             "   Provide a direct answer to EACH part of the query.\n"
                             "   Be concise, structured, and factual.\n"
                             )
-                        )
+
 
 
     def assistant_node(state: AgentState, config: RunnableConfig):
@@ -314,12 +314,27 @@ def make_assistant_node(tools):
                 f"{summary}\n"
             )
 
-        SYSTEM_PROMPT = SystemMessage(content=BASE_SYSTEM_PROMPT + ("\n\n" + summary_msg if summary_msg else ""))
+        # Build final system prompt text (string) then wrap in SystemMessage
+        system_text = BASE_SYSTEM_PROMPT_TEXT + ("\n\n" + summary_msg if summary_msg else "")
+        SYSTEM_PROMPT = SystemMessage(content=system_text)
 
-        response = model.invoke([SYSTEM_PROMPT] + list(state["messages"]), config=config)
+        # response = model.invoke([SYSTEM_PROMPT] + list(state["messages"]), config=config)
+        def _debug_messages(msgs):
+            print("\n--- DEBUG: messages being sent to Ollama ---")
+            for i, m in enumerate(msgs):
+                c = getattr(m, "content", None)
+                print(i, type(m).__name__, "content_type=", type(c).__name__, "len=", (len(c) if isinstance(c, str) else "NA"))
+            total_chars = sum(len(getattr(m, "content", "")) for m in msgs if isinstance(getattr(m, "content", ""), str))
+            print("TOTAL_CHARS =", total_chars)
+            print("--- END DEBUG ---\n")
+
+        msgs = [SYSTEM_PROMPT] + list(state["messages"])
+        _debug_messages(msgs)
+        response = model.invoke(msgs, config=config)
+
         return {"messages": [response]}
 
-    return assistant_node, BASE_SYSTEM_PROMPT
+    return assistant_node, BASE_SYSTEM_PROMPT_TEXT
 
 
 
@@ -328,8 +343,8 @@ def make_assistant_node(tools):
 # ----------------------------
 def make_summarize_node(base_model: ChatOllama, base_system_prompt: str):
     # Tune:
-    MAX_HISTORY_CHARS = 14000  # summarize when exceeded
-    KEEP_LAST_N = 14          # keep recent messages verbatim (safe tail will adjust)
+    MAX_HISTORY_CHARS = 1400  # summarize when exceeded
+    KEEP_LAST_N = 2          # keep recent messages verbatim (safe tail will adjust)
 
     def summarize_node(state: AgentState, config: RunnableConfig):
         messages = list(state.get("messages", []))
