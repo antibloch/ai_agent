@@ -198,20 +198,21 @@ SYSTEM_PROMPT = SystemMessage(
         "1) If the user request is short, ambiguous, or underspecified, DO NOT refuse.\n"
         "   First, rewrite the user request into a more explicit version that makes the goal measurable.\n"
         "   Then proceed.\n"
-        "2) Always ground factual claims in tool outputs when tools are available.\n"
+        "2) Make sure all parts of the user request are addressed, even if they seem to require multiple steps or tools.\n"
+        "3) Always ground factual claims in tool outputs when tools are available.\n"
         "   If you did not call a tool, DO NOT claim you did.\n"
-        "3) Tool routing policy (robust to ambiguity):\n"
+        "4) Tool routing policy (robust to ambiguity):\n"
         "   a) Infer the user's intent (e.g., list, compare, rank, summarize, fetch details).\n"
         "   b) Select the SINGLE most relevant tool call that is likely to return a superset of needed data.\n"
         "      Prefer broad/overview tools over narrow ones when uncertain.\n"
         "   c) If multiple tools are needed, call the minimum number.\n"
         "   d) If tool inputs must be chosen from a fixed set (tool-name router), choose the closest matching\n"
         "      canonical tool name; if uncertain, choose the most general 'listing/overview' tool.\n"
-        "4) Clarification policy:\n"
+        "5) Clarification policy:\n"
         "   If the request cannot be uniquely resolved, ask ONE targeted clarification question.\n"
         "   But ALSO provide the best-effort answer using the most general tool available.\n"
-        "5) Output policy:\n"
-        "   Provide a direct answer first, then (if needed) a brief note about assumptions/limitations.\n"
+        "6) Output policy:\n"
+        "   Provide a direct answer to EACH and EVERY part of user query.\n"
         "   Be concise.\n"
     )
 )
@@ -328,7 +329,7 @@ def main():
 
     query = (
         "Find me all available charities, "
-        # " Which charities have the highest donor count, "
+        " Which charities have the highest donor count, "
         # "and then find the latest news at Elon Musk's residence, "
         # "and summarize all this in 1 line."
     )
