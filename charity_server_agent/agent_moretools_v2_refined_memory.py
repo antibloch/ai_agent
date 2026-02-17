@@ -27,6 +27,7 @@ from langchain_experimental.tools import PythonREPLTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
 
+MODEL="qwen3.5:cloud"
 
 def tool_to_text(t: Any) -> str:
     name = getattr(t, "name", t.__class__.__name__)
@@ -263,7 +264,7 @@ def make_assistant_node(tools):
     We keep your model+prompt behavior, but bind the FULL tool set (local + MCP).
     """
     model = ChatOllama(
-        model="qwen3.5:cloud",
+        model=MODEL,
         temperature=0,
         # base_url="http://localhost:11434",
     ).bind_tools(tools)
@@ -412,7 +413,7 @@ async def build_graph():
     assistant_node, base_system_prompt = make_assistant_node(tools)
 
     # base model for summarizer (can be same as assistant, but not bound to tools)
-    summarizer_model = ChatOllama(model="qwen3.5:cloud", temperature=0)
+    summarizer_model = ChatOllama(model=MODEL, temperature=0)
     summarize_node = make_summarize_node(summarizer_model, base_system_prompt)
 
     workflow.add_node("assistant", assistant_node)
