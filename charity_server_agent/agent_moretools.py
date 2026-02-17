@@ -458,7 +458,7 @@ def main():
     query = (
         "Find me all available charities, "
         " Which charities have the highest donor count, "
-        # "and then find the latest news at Elon Musk's residence, "
+        " What are the mean and median of donor counts across charities, please calculate using python if needed. "
         # "and summarize all this in 1 line."
     )
 
