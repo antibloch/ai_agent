@@ -323,17 +323,18 @@ def make_assistant_node(tools):
         SYSTEM_PROMPT = SystemMessage(content=system_text)
 
         # response = model.invoke([SYSTEM_PROMPT] + list(state["messages"]), config=config)
-        def _debug_messages(msgs):
-            print("\n--- DEBUG: messages being sent to Ollama ---")
-            for i, m in enumerate(msgs):
-                c = getattr(m, "content", None)
-                print(i, type(m).__name__, "content_type=", type(c).__name__, "len=", (len(c) if isinstance(c, str) else "NA"))
-            total_chars = sum(len(getattr(m, "content", "")) for m in msgs if isinstance(getattr(m, "content", ""), str))
-            print("TOTAL_CHARS =", total_chars)
-            print("--- END DEBUG ---\n")
+        
+        # def _debug_messages(msgs):
+        #     print("\n--- DEBUG: messages being sent to Ollama ---")
+        #     for i, m in enumerate(msgs):
+        #         c = getattr(m, "content", None)
+        #         print(i, type(m).__name__, "content_type=", type(c).__name__, "len=", (len(c) if isinstance(c, str) else "NA"))
+        #     total_chars = sum(len(getattr(m, "content", "")) for m in msgs if isinstance(getattr(m, "content", ""), str))
+        #     print("TOTAL_CHARS =", total_chars)
+        #     print("--- END DEBUG ---\n")
 
         msgs = [SYSTEM_PROMPT] + list(state["messages"])
-        _debug_messages(msgs)
+        # _debug_messages(msgs)
         response = model.invoke(msgs, config=config)
 
         return {"messages": [response]}
@@ -347,7 +348,7 @@ def make_assistant_node(tools):
 # ----------------------------
 def make_summarize_node(base_model: ChatOllama, base_system_prompt: str):
     # Tune:
-    MAX_HISTORY_CHARS = 1400  # summarize when exceeded
+    MAX_HISTORY_CHARS = 2000  # summarize when exceeded
     KEEP_LAST_N = 2          # keep recent messages verbatim (safe tail will adjust)
 
     def summarize_node(state: AgentState, config: RunnableConfig):
