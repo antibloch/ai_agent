@@ -292,7 +292,9 @@ async def main():
 
     # Option A: single-shot invoke (final state returned)
     out_state = await graph.ainvoke(inputs)
-    print(out_state["messages"][-1].content)
+    out_msg=out_state["messages"][-1].content
+    console = Console()
+    console.print(Markdown(out_msg))
 
     # Option B: stream steps (uncomment to see tool/model turns)
     # for step in graph.stream(inputs, stream_mode="values"):
