@@ -157,7 +157,7 @@ def build_node_stats_tool():
         "charity_blogs",
         "charity_address",
         "charity_country_availability",
-        "chairty_contact_info",  # NOTE: typo-canonical in your Node router
+        "charity_contact_info",  # NOTE: typo-canonical in your Node router
     ]
 
     def call_node_stats(tool_name: str) -> str:
@@ -213,7 +213,7 @@ def build_node_stats_tool():
             "7. charity_blogs: Narrative updates and blog posts from the charities.\n"
             "8. charity_address: Physical locations and HQ details (Good for listing charities).\n"
             "9. charity_country_availability: Where these charities operate.\n"
-            "10. chairty_contact_info: Emails, phones, and websites (Use this exact spelling).\n"
+            "10. charity_contact_info: Emails, phones, and websites (Use this exact spelling).\n"
             "\nReturns JSON: {ok, tool, query, data, meta}.\n"
             "'data' field contains the actual response from the Node server for the given tool query."
         ),
@@ -312,7 +312,7 @@ SYSTEM_PROMPT = SystemMessage(
         "       • charity_blogs\n"
         "       • charity_address\n"
         "       • charity_country_availability\n"
-        "       • chairty_contact_info\n"
+        "       • charity_contact_info\n"
         "   - Returns structured JSON: {ok, tool, query, data, meta}.\n"
         "\n"
         "2) PythonREPLTool(code)\n"
