@@ -1,6 +1,6 @@
 import json
 import requests
-im
+from rich import print
 import os
 import asyncio
 from typing import Annotated, Sequence, TypedDict
@@ -280,8 +280,8 @@ async def main():
 
     query = (
         "Find me all available charities, "
-        # " Which charities have the highest donor count, "
-        # " What are the mean and median of donor counts across charities, please calculate using python if needed, "
+        " Which charities have the highest donor count, "
+        " What are the mean and median of donor counts across charities, please calculate using python if needed, "
         " List all of the charities's contact info "
         # " and summarize all this in 1 line."
     )
