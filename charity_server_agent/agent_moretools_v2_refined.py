@@ -154,9 +154,6 @@ def build_node_stats_tool():
 
 
 
-# ----------------------------
-# 1) Build Tools
-# ----------------------------
 def build_local_tools():
     # Both are "single input" tools
     return [
@@ -281,7 +278,7 @@ async def main():
 
 
     query = (
-        "Find me all available charities, "
+        " Find me all available charities, "
         " Which charities have the highest donor count, "
         " What are the mean and median of donor counts across charities, please calculate using python if needed, "
         " Provide info about charities from their websites "
