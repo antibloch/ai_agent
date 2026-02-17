@@ -263,7 +263,7 @@ def make_assistant_node(tools):
     We keep your model+prompt behavior, but bind the FULL tool set (local + MCP).
     """
     model = ChatOllama(
-        model="qc:latest",
+        model="qwen3.5:cloud",
         temperature=0,
         # base_url="http://localhost:11434",
     ).bind_tools(tools)
@@ -310,9 +310,12 @@ def make_assistant_node(tools):
         summary_msg = ""
         if summary:
             summary_msg = (
-                "MEMORY SUMMARY (compressed prior context; treat as long-term memory):\n"
+                "INTERNAL MEMORY (compressed prior context; treat as long-term memory):\n"
+                "<memory>\n"
                 f"{summary}\n"
+                "</memory>\n"
             )
+
 
         # Build final system prompt text (string) then wrap in SystemMessage
         system_text = BASE_SYSTEM_PROMPT_TEXT + ("\n\n" + summary_msg if summary_msg else "")
@@ -365,17 +368,15 @@ def make_summarize_node(base_model: ChatOllama, base_system_prompt: str):
 
         summarizer_prompt = [
             SystemMessage(content=(
-                "You are a memory summarizer for an LLM agent.\n"
-                "Update the existing memory summary using the new dialogue.\n"
-                "Rules:\n"
-                "- Keep durable facts only (names, preferences, goals, constraints, decisions).\n"
-                "- Keep key tool findings (final numeric results, best-ranked items, important URLs).\n"
-                "- Drop chatter and duplicates.\n"
-                "- Output 6–12 bullet points max.\n"
-                "- Be concise.\n"
+                "You maintain INTERNAL MEMORY for an agent.\n"
+                "Write ONLY durable facts as compact key:value lines.\n"
+                "No headings. No narrative. No 'Summary'. No formatting intended for the user.\n"
+                "Examples:\n"
+                "charities.count: 2\n"
+                "charity.HelpingHands.location: Karachi\n"
             )),
             HumanMessage(content=(
-                f"EXISTING SUMMARY:\n{existing_summary if existing_summary else '(none)'}\n\n"
+                f"EXISTING INTERNAL MEMORY:\n{existing_summary if existing_summary else '(none)'}\n\n"
                 f"NEW DIALOGUE TO INCORPORATE:\n{head_text}"
             )),
         ]
@@ -411,7 +412,7 @@ async def build_graph():
     assistant_node, base_system_prompt = make_assistant_node(tools)
 
     # base model for summarizer (can be same as assistant, but not bound to tools)
-    summarizer_model = ChatOllama(model="qc:latest", temperature=0)
+    summarizer_model = ChatOllama(model="qwen3.5:cloud", temperature=0)
     summarize_node = make_summarize_node(summarizer_model, base_system_prompt)
 
     workflow.add_node("assistant", assistant_node)

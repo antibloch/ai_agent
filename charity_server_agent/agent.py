@@ -249,7 +249,7 @@ class AgentState(TypedDict):
 # 3) Defining model as base of LLM agent
 # --------------------------------------------
 model = ChatOllama(
-    model="qc:latest",
+    model="qwen3.5:cloud",
     temperature=0,
     # base_url="http://localhost:11434",  # if you changed host/port
 ).bind_tools(tools)  # IMPORTANT: enables tool calling

@@ -5,7 +5,7 @@ from rich.markdown import Markdown
 from rich import print
 import os
 import asyncio
-from typing import Annotated, Sequence, TypedDict, Any, List, Optional
+from typing import Annotated, Sequence, TypedDict, Any, List
 
 from langchain_core.tools import Tool
 from langchain_core.messages import (
@@ -28,16 +28,16 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 
 
 
+MODEL="qc:latest"
+
 def tool_to_text(t: Any) -> str:
     name = getattr(t, "name", t.__class__.__name__)
     desc = (getattr(t, "description", "") or "").strip()
 
-    # Try to expose arg schema (best-effort)
     schema = None
     args_schema = getattr(t, "args_schema", None)
     if args_schema is not None:
         try:
-            # Pydantic v1/v2 compat-ish
             if hasattr(args_schema, "model_json_schema"):
                 schema = args_schema.model_json_schema()
             elif hasattr(args_schema, "schema"):
@@ -45,7 +45,6 @@ def tool_to_text(t: Any) -> str:
         except Exception:
             schema = None
 
-    # Some tools may have raw schema differently
     if schema is None:
         raw_schema = getattr(t, "tool_call_schema", None) or getattr(t, "schema", None)
         if isinstance(raw_schema, dict):
@@ -55,7 +54,6 @@ def tool_to_text(t: Any) -> str:
     if desc:
         parts.append(f"  Description: {desc}")
     if schema:
-        # keep compact; don’t dump huge schemas
         props = schema.get("properties", {})
         required = schema.get("required", [])
         if props:
@@ -64,17 +62,14 @@ def tool_to_text(t: Any) -> str:
             parts.append(f"  Required: {', '.join(required)}")
     return "\n".join(parts)
 
+
 def textual_description_of_tools(tools) -> str:
     return "\n\n".join(tool_to_text(t) for t in tools)
 
 
-
-
 class AgentState(TypedDict, total=False):
     messages: Annotated[Sequence[BaseMessage], add_messages]
-    summary: str
-
-
+    memory_kv: str  # renamed from "summary" to avoid priming
 
 
 def build_node_stats_tool():
@@ -155,29 +150,13 @@ def build_node_stats_tool():
     )
 
 
-
-
 def build_local_tools():
-    # Both are "single input" tools
-    return [
-            build_node_stats_tool(), 
-            # DuckDuckGoSearchRun(), 
-            PythonREPLTool()
-            ]
-
-
+    return [build_node_stats_tool(), PythonREPLTool()]
 
 
 async def setup_tools():
-    """
-    Adds an MCP server that can fetch a URL's content.
-    Uses stdio transport, launched as a subprocess (like the reference code).
-    """
     local_tools = build_local_tools()
 
-    # "fetcher-mcp" is an MCP server that exposes fetch_url / fetch_urls (via npx).
-    # Source: MCP server listing describing fetch_url tool and how to run it.
-    # If you prefer a different server, swap command/args accordingly.
     client = MultiServerMCPClient(
         {
             "fetch": {
@@ -192,65 +171,48 @@ async def setup_tools():
     return [*local_tools, *mcp_tools]
 
 
-
 # ----------------------------
-# Memory summarization helpers
+# Token / size helpers (char-based heuristic)
 # ----------------------------
-def _count_chars(messages: Sequence[BaseMessage]) -> int:
-    total = 0
-    for m in messages:
-        c = getattr(m, "content", "")
-        if isinstance(c, str):
-            total += len(c)
-    return total
+def _msg_text_len(m: BaseMessage) -> int:
+    c = getattr(m, "content", "")
+    if isinstance(c, str):
+        return len(c)
+    # Some tool messages can be list/dict; count a small constant to avoid zeroing them out.
+    return 50
 
 
+def _total_prompt_chars(system_text: str, memory_text: str, messages: Sequence[BaseMessage]) -> int:
+    return len(system_text) + len(memory_text) + sum(_msg_text_len(m) for m in messages)
 
 
-def _safe_tail(messages: List[BaseMessage], max_keep: int = 8) -> List[BaseMessage]:
+def _safe_tail(messages: List[BaseMessage], keep_last_n: int) -> List[BaseMessage]:
     """
-    Instead of “keep last N messages”, keep the last complete interaction block:
-
-    last HumanMessage
-
-    then any AIMessage
-
-    then all ToolMessages that follow that AIMessage (if any)
-
-    then the final AIMessage that concludes
+    Keep the last N messages, but avoid starting with ToolMessage.
+    Also ensure the final AIMessage is included in the tail if present.
     """
     if not messages:
         return []
 
-    # start from the end, collect up to max_keep but ensure tool blocks are complete
-    tail = []
-    i = len(messages) - 1
+    start = max(0, len(messages) - keep_last_n)
 
-    # always keep at least the last message
-    tail.append(messages[i]); i -= 1
+    # Ensure the last AIMessage is in tail (important for keeping final answer)
+    last_ai = None
+    for i in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[i], AIMessage):
+            last_ai = i
+            break
+    if last_ai is not None:
+        start = min(start, last_ai)
 
-    # if last is ToolMessage, keep going left until we find the AIMessage that triggered them
-    while i >= 0 and isinstance(tail[-1], ToolMessage):
-        tail.append(messages[i]); i -= 1
+    # Avoid starting with ToolMessage
+    while start > 0 and isinstance(messages[start], ToolMessage):
+        start -= 1
 
-    # now if we have tool messages, ensure we include the triggering AIMessage
-    if any(isinstance(m, ToolMessage) for m in tail):
-        while i >= 0 and not isinstance(messages[i], AIMessage):
-            tail.append(messages[i]); i -= 1
-        if i >= 0:
-            tail.append(messages[i]); i -= 1
-
-    # finally, try to include the most recent HumanMessage before that
-    while i >= 0 and not isinstance(messages[i], HumanMessage) and len(tail) < max_keep:
-        tail.append(messages[i]); i -= 1
-    if i >= 0 and isinstance(messages[i], HumanMessage):
-        tail.append(messages[i])
-
-    return list(reversed(tail))
+    return messages[start:]
 
 
-
-def _format_for_summary(msgs: Sequence[BaseMessage]) -> str:
+def _format_for_memory(msgs: Sequence[BaseMessage]) -> str:
     """
     Convert messages into a compact, summarizer-friendly transcript.
     Avoid dumping huge tool payloads: truncate ToolMessage content.
@@ -260,166 +222,188 @@ def _format_for_summary(msgs: Sequence[BaseMessage]) -> str:
         role = getattr(m, "type", m.__class__.__name__).upper()
         content = getattr(m, "content", "")
 
-        if isinstance(m, ToolMessage) and isinstance(content, str):
-            # Tool outputs can be huge—truncate hard.
-            if len(content) > 2000:
-                content = content[:2000] + "\n...[truncated tool output]..."
+        if isinstance(m, ToolMessage):
+            if isinstance(content, str) and len(content) > 2000:
+                content = content[:2000] + "\n...[tool output truncated]..."
+            elif not isinstance(content, str):
+                # Make tool outputs stable-ish
+                content = str(content)[:2000]
 
         if isinstance(content, str):
             content = content.strip()
+
         if content:
             lines.append(f"{role}: {content}")
     return "\n".join(lines)
 
+
 # ----------------------------
-# Memory summarization helpers
+# Assistant node
 # ----------------------------
-
-
-
 def make_assistant_node(tools):
-    """
-    We keep your model+prompt behavior, but bind the FULL tool set (local + MCP).
-    """
     model = ChatOllama(
-        model="qc:latest",
+        model=MODEL,
         temperature=0,
-        # base_url="http://localhost:11434",
     ).bind_tools(tools)
 
     tools_description = textual_description_of_tools(tools)
 
-
     BASE_SYSTEM_PROMPT_TEXT = (
-                            "You are a tool-using AI assistant.\n"
-                            "\n"
-                            "AVAILABLE TOOLS:\n" + tools_description +
-                            "\n"
-                            "GENERAL OPERATING RULES:\n"
-                            "1) If the user request is short, ambiguous, or underspecified, DO NOT refuse.\n"
-                            "   First rewrite the request internally into a clearer, measurable objective.\n"
-                            "   Then proceed.\n"
-                            "\n"
-                            "2) Every part of the user's request MUST be addressed.\n"
-                            "   If multiple steps are required, perform them sequentially.\n"
-                            "\n"
-                            "3) All factual claims about charities MUST be grounded in get_charity_stats tool output.\n"
-                            "   If you did not call a tool, DO NOT claim you did.\n"
-                            "\n"
-                            "4) Tool routing policy:\n"
-                            "   a) Infer the user's intent (list, compare, rank, summarize, compute, etc.).\n"
-                            "   b) If the question concerns charity information, ALWAYS call get_charity_stats.\n"
-                            "   c) If uncertain which canonical tool name to use, choose the most general overview tool\n"
-                            "      (e.g., charity_address for listing charities).\n"
-                            "   d) Use the MINIMUM number of tool calls required.\n"
-                            "\n"
-                            "5) Clarification policy:\n"
-                            "   If the request cannot be uniquely resolved, ask ONE precise clarification question,\n"
-                            "   but ALSO provide a best-effort answer using the most relevant available tool.\n"
-                            "\n"
-                            "6) Output policy:\n"
-                            "   Provide a direct answer to EACH part of the query.\n"
-                            "   Be concise, structured, and factual.\n"
-                            )
-
-
+        "You are a tool-using AI assistant.\n"
+        "\n"
+        "AVAILABLE TOOLS:\n"
+        f"{tools_description}\n"
+        "\n"
+        "GENERAL OPERATING RULES:\n"
+        "1) If the user request is short, ambiguous, or underspecified, DO NOT refuse.\n"
+        "   First rewrite the request internally into a clearer, measurable objective.\n"
+        "   Then proceed.\n"
+        "\n"
+        "2) Every part of the user's request MUST be addressed.\n"
+        "   If multiple steps are required, perform them sequentially.\n"
+        "\n"
+        "3) All factual claims about charities MUST be grounded in get_charity_stats tool output.\n"
+        "   If you did not call a tool, DO NOT claim you did.\n"
+        "\n"
+        "4) Tool routing policy:\n"
+        "   a) Infer the user's intent (list, compare, rank, compute, etc.).\n"
+        "   b) If the question concerns charity information, ALWAYS call get_charity_stats.\n"
+        "   c) If uncertain which canonical tool name to use, choose the most general overview tool\n"
+        "      (e.g., charity_address for listing charities).\n"
+        "   d) Use the MINIMUM number of tool calls required.\n"
+        "\n"
+        "5) Clarification policy:\n"
+        "   If the request cannot be uniquely resolved, ask ONE precise clarification question,\n"
+        "   but ALSO provide a best-effort answer using the most relevant available tool.\n"
+        "\n"
+        "6) Output policy:\n"
+        "   Provide a direct answer to EACH part of the query.\n"
+        "   Be concise, structured, and factual.\n"
+    )
 
     def assistant_node(state: AgentState, config: RunnableConfig):
-        summary = (state.get("summary") or "").strip()
-        summary_msg = ""
-        if summary:
-            summary_msg = (
-                "MEMORY SUMMARY (compressed prior context; treat as long-term memory):\n"
-                f"{summary}\n"
+        memory_kv = (state.get("memory_kv") or "").strip()
+
+        sys_msg = SystemMessage(content=BASE_SYSTEM_PROMPT_TEXT)
+
+        # IMPORTANT: memory is a separate SystemMessage and labeled neutrally.
+        # No "summary" tokens, no "Summary:" headings.
+        mem_msg = None
+        if memory_kv:
+            mem_msg = SystemMessage(
+                content=(
+                    "REFERENCE FACTS (internal context):\n"
+                    "<facts>\n"
+                    f"{memory_kv}\n"
+                    "</facts>\n"
+                )
             )
 
-        # Build final system prompt text (string) then wrap in SystemMessage
-        system_text = BASE_SYSTEM_PROMPT_TEXT + ("\n\n" + summary_msg if summary_msg else "")
-        SYSTEM_PROMPT = SystemMessage(content=system_text)
+        msgs = [sys_msg]
+        if mem_msg:
+            msgs.append(mem_msg)
+        msgs.extend(list(state.get("messages", [])))
 
-        # response = model.invoke([SYSTEM_PROMPT] + list(state["messages"]), config=config)
-        def _debug_messages(msgs):
-            print("\n--- DEBUG: messages being sent to Ollama ---")
-            for i, m in enumerate(msgs):
-                c = getattr(m, "content", None)
-                print(i, type(m).__name__, "content_type=", type(c).__name__, "len=", (len(c) if isinstance(c, str) else "NA"))
-            total_chars = sum(len(getattr(m, "content", "")) for m in msgs if isinstance(getattr(m, "content", ""), str))
-            print("TOTAL_CHARS =", total_chars)
-            print("--- END DEBUG ---\n")
+        # Debug
+        # print("\n--- DEBUG: messages being sent to Ollama ---")
+        # for i, m in enumerate(msgs):
+        #     c = getattr(m, "content", None)
+        #     print(i, type(m).__name__, "content_type=", type(c).__name__, "len=", (len(c) if isinstance(c, str) else "NA"))
+        # total_chars = sum(len(getattr(m, "content", "")) for m in msgs if isinstance(getattr(m, "content", ""), str))
+        # print("TOTAL_CHARS =", total_chars)
+        # print("--- END DEBUG ---\n")
 
-        msgs = [SYSTEM_PROMPT] + list(state["messages"])
-        _debug_messages(msgs)
         response = model.invoke(msgs, config=config)
-
         return {"messages": [response]}
 
     return assistant_node, BASE_SYSTEM_PROMPT_TEXT
 
 
-
 # ----------------------------
-#  Summarizer node
+# Memory writer node (summarizer)
 # ----------------------------
-def make_summarize_node(base_model: ChatOllama, base_system_prompt: str):
-    # Tune:
-    MAX_HISTORY_CHARS = 1400  # summarize when exceeded
-    MAX_KEEP_N = 2          # keep recent messages verbatim (safe tail will adjust)
+def make_memory_node(base_model: ChatOllama, base_system_prompt: str):
+    # Budget is for: base_system_prompt + memory + messages.
+    # Char-based heuristic; adjust for your model/context window.
+    PROMPT_CHAR_BUDGET = 2000
+    KEEP_LAST_N = 1  # keep a bit more; includes final answer + recent context safely
 
-    def summarize_node(state: AgentState, config: RunnableConfig):
+    def memory_node(state: AgentState, config: RunnableConfig):
         messages = list(state.get("messages", []))
-        if len(messages) <= MAX_KEEP_N:
+        if len(messages) <= KEEP_LAST_N:
             return {}
 
-        if _count_chars(messages) < MAX_HISTORY_CHARS:
+        memory_kv = (state.get("memory_kv") or "").strip()
+        total_chars = _total_prompt_chars(base_system_prompt, memory_kv, messages)
+
+        if total_chars <= PROMPT_CHAR_BUDGET:
             return {}
 
-        tail = _safe_tail(messages, MAX_KEEP_N)
+        tail = _safe_tail(messages, KEEP_LAST_N)
         head = messages[: max(0, len(messages) - len(tail))]
-
         if not head:
             return {}
 
-        existing_summary = (state.get("summary") or "").strip()
-        head_text = _format_for_summary(head)
+        head_text = _format_for_memory(head)
 
-        summarizer_prompt = [
-            SystemMessage(content=(
-                "You are a memory summarizer for an LLM agent.\n"
-                "Update the existing memory summary using the new dialogue.\n"
-                "Rules:\n"
-                "- Keep durable facts only (names, preferences, goals, constraints, decisions).\n"
-                "- Keep key tool findings (final numeric results, best-ranked items, important URLs).\n"
-                "- Drop chatter and duplicates.\n"
-                "- Output 6–12 bullet points max.\n"
-                "- Be concise.\n"
-            )),
-            HumanMessage(content=(
-                f"EXISTING SUMMARY:\n{existing_summary if existing_summary else '(none)'}\n\n"
-                f"NEW DIALOGUE TO INCORPORATE:\n{head_text}"
-            )),
+        prompt = [
+            SystemMessage(
+                content=(
+                    "You write internal reference memory for an agent.\n"
+                    "Update the existing memory using the new dialogue.\n"
+                    "\n"
+                    "Output MUST have exactly two sections in this order:\n"
+                    "1) FACTS:\n"
+                    "   - Each line is 'key: value' (no bullets).\n"
+                    "   - Keep stable identifiers.\n"
+                    "   - Include numbers, locations, categories, product prices, contact fields if present.\n"
+                    "2) NOTES:\n"
+                    "   - 1 to 6 short sentences.\n"
+                    "   - Capture conclusions, caveats, assumptions, and what the user asked for.\n"
+                    "   - Mention missing data (e.g., website URLs not available) if relevant.\n"
+                    "\n"
+                    "Hard constraints:\n"
+                    "- Max total: 22 lines.\n"
+                    "- No headings other than exactly 'FACTS:' and 'NOTES:'.\n"
+                    "- No markdown, no bullets, no extra sections.\n"
+                    "- Do not include tool call IDs or raw JSON blobs.\n"
+                    "\n"
+                    "Recommended keys (use only what exists):\n"
+                    "charities.count\n"
+                    "charity.<Name>.location\n"
+                    "charity.<Name>.donorCount\n"
+                    "charity.<Name>.categories\n"
+                    "charity.<Name>.product.<ProductName>\n"
+                    "charity.donorCount.mean\n"
+                    "charity.donorCount.median\n"
+                    "data.missing.websiteUrls (true/false)\n"
+                    "\n"
+                    "Example:\n"
+                    "FACTS:\n"
+                    "charities.count: 2\n"
+                    "charity.HelpingHands.location: Karachi, Pakistan\n"
+                    "charity.HelpingHands.donorCount: 4\n"
+                    "NOTES:\n"
+                    "User requested all charities, ranking by donors, and mean/median donor counts.\n"
+                    "Website URLs had info about state of charities.\n"
+                )
+            ),
+            HumanMessage(
+                content=(
+                    f"EXISTING FACTS:\n{memory_kv if memory_kv else '(none)'}\n\n"
+                    f"NEW DIALOGUE:\n{head_text}"
+                )
+            ),
         ]
 
-        summary_msg = base_model.invoke(summarizer_prompt, config=config)
-        new_summary = (getattr(summary_msg, "content", "") or "").strip()
-        if not new_summary:
+        mem_msg = base_model.invoke(prompt, config=config)
+        new_mem = (getattr(mem_msg, "content", "") or "").strip()
+        if not new_mem:
             return {}
 
-        # IMPORTANT: we do NOT keep the old head messages; we keep only tail + updated summary
-        return {"summary": new_summary, "messages": tail}
+        return {"memory_kv": new_mem, "messages": tail}
 
-    return summarize_node
-
-
-def should_summarize(state: AgentState) -> str:
-    # Only summarize after a full tool loop finishes (i.e., after assistant returns without tool calls),
-    # OR you can summarize more aggressively. Here: always check after assistant.
-    # We route to "summarize" unconditionally; summarize_node itself is a no-op unless thresholds exceeded.
-    return "summarize"
-
-# ----------------------------
-#  Summarizer node
-# ----------------------------
-
+    return memory_node
 
 
 async def build_graph():
@@ -429,35 +413,29 @@ async def build_graph():
 
     assistant_node, base_system_prompt = make_assistant_node(tools)
 
-    # base model for summarizer (can be same as assistant, but not bound to tools)
-    summarizer_model = ChatOllama(model="qc:latest", temperature=0)
-    summarize_node = make_summarize_node(summarizer_model, base_system_prompt)
+    memory_model = ChatOllama(model=MODEL, temperature=0)
+    memory_node = make_memory_node(memory_model, base_system_prompt)
 
     workflow.add_node("assistant", assistant_node)
     workflow.add_node("tools", ToolNode(tools))
-    workflow.add_node("summarize", summarize_node)
+    workflow.add_node("memory", memory_node)
 
     workflow.add_edge(START, "assistant")
 
-    # assistant -> tools or summarize (and eventually end)
     workflow.add_conditional_edges(
         "assistant",
         tools_condition,
         {
             "tools": "tools",
-            END: "summarize",  # no tool calls => possibly summarize, then end
+            END: "memory",
         },
     )
 
     workflow.add_edge("tools", "assistant")
-    workflow.add_edge("summarize", END)
+    workflow.add_edge("memory", END)
 
-    # Add checkpointing so summary/messages persist by thread_id
     checkpointer = InMemorySaver()
     return workflow.compile(checkpointer=checkpointer)
-
-
-
 
 
 async def main():
@@ -471,9 +449,8 @@ async def main():
         "What kind of items do they provide, and what are the price descriptions for these items"
     )
 
-    inputs = {"messages": [HumanMessage(content=query)], "summary": ""}
+    inputs = {"messages": [HumanMessage(content=query)], "memory_kv": ""}
 
-    # IMPORTANT: provide thread_id so memory persists across multiple invokes
     config: RunnableConfig = {"configurable": {"thread_id": "charity-demo-1"}}
 
     out_state = await graph.ainvoke(inputs, config=config)
@@ -484,12 +461,11 @@ async def main():
     print("-----------------------------------------------------------------------")
     console.print(Markdown(out_msg))
 
-    # Show compressed memory (if summarization triggered)
-    summary = (out_state.get("summary") or "").strip()
-    if summary:
-        print("\n\n[Memory Summary Stored]")
+    memory_kv = (out_state.get("memory_kv") or "").strip()
+    if memory_kv:
+        print("\n\n[Stored Reference Facts]")
         print("-----------------------------------------------------------------------")
-        console.print(Markdown(summary))
+        console.print(Markdown(memory_kv))
 
 
 if __name__ == "__main__":
