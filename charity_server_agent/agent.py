@@ -125,13 +125,19 @@ def build_node_stats_tool():
     return Tool(
     name="get_charity_stats",
     description=(
-        "Fetch internal charity data from Node.\n"
+        "Fetch internal charity data from Node-js server.\n"
         "Input MUST be EXACTLY one tool name.\n"
-        "Common calls:\n"
-        "- 'charity_address' => lists all charities + their addresses (use this to list charities)\n"
-        "- 'chairty_contact_info' => lists all charities + contact info\n"
-        "- 'charity_donor_count' => donor counts per charity\n"
-        "- 'charity_impactlife' => impactLife per charity\n"
+        "The input must be EXACTLY one of the following canonical tool names:\n"
+        f"1. charity_donor_count: Number of unique donors per charity.\n"
+        f"2. charity_impactlife: Human impact/lives touched metrics.\n"
+        f"3. charity_donor_amount: Total currency amount donated.\n"
+        f"4. charity_total_donation: Breakdown of product-specific donation counts.\n"
+        f"5. charity_items_category: Categories of aid provided (e.g., Food, Health).\n"
+        f"6. charity_product_price_description: Details on specific charity products/vouchers.\n"
+        f"7. charity_blogs: Narrative updates and blog posts from the charities.\n"
+        f"8. charity_address: Physical locations and HQ details (Good for listing charities).\n"
+        f"9. charity_country_availability: Where these charities operate.\n"
+        f"10. chairty_contact_info: Emails, phones, and websites (Note: Use this specific spelling).\n"
         "Returns JSON: {ok, tool, query, data, meta}."
     ),
     func=call_node_stats,
