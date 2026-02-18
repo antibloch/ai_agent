@@ -33,6 +33,7 @@ pip install "uvicorn[standard]"
 
 pip install rich
 
+pip install -U langchain-nvidia-ai-endpoints
 ```
 
 

@@ -161,7 +161,7 @@ def build_plan_execute_graph(model: ChatOllama, tools):
 # ----------------------------
 def main():
     tools = build_tools()
-
+    
     model = ChatOllama(
         model="qc:latest",
         temperature=0,
@@ -181,7 +181,6 @@ def main():
         "and then find the latest news at Elon Musk's residence. "
         "and summarize all this in 1 line."
     )
-
 
     state: AgentState = {
         "user_query": query,

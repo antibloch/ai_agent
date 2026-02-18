@@ -203,7 +203,6 @@ def make_assistant_node(tools):
 
     tools_description = textual_description_of_tools(tools)
 
-
     SYSTEM_PROMPT = SystemMessage(
                         content=(
                             "You are a tool-using AI assistant.\n"
@@ -265,9 +264,6 @@ async def build_graph():
 
     workflow.add_edge("tools", "assistant")
     return workflow.compile()
-
-
-
 
 
 # ----------------------------

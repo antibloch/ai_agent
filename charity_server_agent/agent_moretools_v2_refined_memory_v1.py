@@ -1,43 +1,56 @@
+import os
 import json
+import asyncio
 import requests
+from typing import Annotated, Sequence, TypedDict, Any, List, Optional
+
 from rich.console import Console
 from rich.markdown import Markdown
 from rich import print
-import os
-import asyncio
-from typing import Annotated, Sequence, TypedDict
 
 from langchain_core.tools import Tool
-
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import (
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    AIMessage,
+    ToolMessage,
+    RemoveMessage,
+)
 from langchain_core.runnables import RunnableConfig
-
-from langgraph.graph.message import add_messages
-from langgraph.graph import StateGraph, START, END
-from langgraph.prebuilt import ToolNode, tools_condition
-from langgraph.checkpoint.memory import MemorySaver  # Added MemorySaver
-from langchain_core.messages import RemoveMessage  # Added RemoveMessage
-
-from langchain_community.tools import DuckDuckGoSearchRun
-from langchain_experimental.tools import PythonREPLTool
 from langchain_ollama import ChatOllama
 
+from langchain_experimental.tools import PythonREPLTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
+from langgraph.graph.message import add_messages, REMOVE_ALL_MESSAGES
+from langgraph.graph import StateGraph, START, END
+from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.checkpoint.memory import InMemorySaver
 
-import json
-from typing import Any
+os.environ["USER_AGENT"] = "my-langchain-agent/1.0"
+
+
+# ============================
+# 0) Config: summarization trigger
+# ============================
+MAX_NUM_MSGS = 3          # Trigger summarization when len(messages) > MAX_NUM_MSGS
+KEEP_LAST_N = 2            # Keep a safe tail of recent messages (will be adjusted to avoid starting with ToolMessage)
+MAX_TOOL_LOOPS = 8        # Max allowed tool loops before forcing summarization to break potential infinite loops.
+MODEL = "qc:latest"  # Ollama model for assistant node
+
+# ============================
+# 1) Tool description helpers
+# ============================
 
 def tool_to_text(t: Any) -> str:
     name = getattr(t, "name", t.__class__.__name__)
     desc = (getattr(t, "description", "") or "").strip()
 
-    # Try to expose arg schema (best-effort)
     schema = None
     args_schema = getattr(t, "args_schema", None)
     if args_schema is not None:
         try:
-            # Pydantic v1/v2 compat-ish
             if hasattr(args_schema, "model_json_schema"):
                 schema = args_schema.model_json_schema()
             elif hasattr(args_schema, "schema"):
@@ -45,7 +58,6 @@ def tool_to_text(t: Any) -> str:
         except Exception:
             schema = None
 
-    # Some tools may have raw schema differently
     if schema is None:
         raw_schema = getattr(t, "tool_call_schema", None) or getattr(t, "schema", None)
         if isinstance(raw_schema, dict):
@@ -55,7 +67,6 @@ def tool_to_text(t: Any) -> str:
     if desc:
         parts.append(f"  Description: {desc}")
     if schema:
-        # keep compact; don’t dump huge schemas
         props = schema.get("properties", {})
         required = schema.get("required", [])
         if props:
@@ -64,17 +75,15 @@ def tool_to_text(t: Any) -> str:
             parts.append(f"  Required: {', '.join(required)}")
     return "\n".join(parts)
 
+
 def textual_description_of_tools(tools) -> str:
     return "\n\n".join(tool_to_text(t) for t in tools)
 
 
-
-
-class AgentState(TypedDict):
+class AgentState(TypedDict, total=False):
     messages: Annotated[Sequence[BaseMessage], add_messages]
-    summary: str  # Added summary field
-
-
+    summary: str
+    tool_loops: int
 
 
 def build_node_stats_tool():
@@ -156,28 +165,16 @@ def build_node_stats_tool():
 
 
 
-
 def build_local_tools():
-    # Both are "single input" tools
     return [
-            build_node_stats_tool(), 
-            # DuckDuckGoSearchRun(), 
-            PythonREPLTool()
-            ]
-
-
+        build_node_stats_tool(),
+        PythonREPLTool(),
+    ]
 
 
 async def setup_tools():
-    """
-    Adds an MCP server that can fetch a URL's content.
-    Uses stdio transport, launched as a subprocess (like the reference code).
-    """
     local_tools = build_local_tools()
 
-    # "fetcher-mcp" is an MCP server that exposes fetch_url / fetch_urls (via npx).
-    # Source: MCP server listing describing fetch_url tool and how to run it.
-    # If you prefer a different server, swap command/args accordingly.
     client = MultiServerMCPClient(
         {
             "fetch": {
@@ -187,30 +184,80 @@ async def setup_tools():
             }
         }
     )
-
     mcp_tools = await client.get_tools()
     return [*local_tools, *mcp_tools]
 
 
+# ============================
+# 4) Memory summarization helpers
+# ============================
+def _safe_tail(messages: List[BaseMessage], keep_last_n: int) -> List[BaseMessage]:
+    """
+    MUST preserve the last user instruction.
+    Strategy:
+      - Find the last HumanMessage; keep from there to the end.
+      - If that slice is smaller than keep_last_n, expand left.
+      - Never start with ToolMessage (expand one step left if needed).
+    """
+    if not messages:
+        return []
+
+    # 1) Anchor: last HumanMessage (critical)
+    last_human_idx = None
+    for i in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[i], HumanMessage):
+            last_human_idx = i
+            break
+
+    if last_human_idx is None:
+        # No human in history (rare). Fall back to last N.
+        start = max(0, len(messages) - keep_last_n)
+    else:
+        start = last_human_idx
+
+        # Ensure we keep at least keep_last_n messages (expand left if needed)
+        desired_start = max(0, len(messages) - keep_last_n)
+        start = min(start, desired_start)
+
+    # 2) Avoid starting with ToolMessage (breaks tool-call pairing)
+    while start > 0 and isinstance(messages[start], ToolMessage):
+        start -= 1
+
+    return messages[start:]
 
 
+
+def _format_for_summary(msgs: Sequence[BaseMessage]) -> str:
+    """
+    Convert to summarizer-friendly transcript. Truncate large tool outputs.
+    """
+    lines: List[str] = []
+    for m in msgs:
+        role = getattr(m, "type", m.__class__.__name__).upper()
+        content = getattr(m, "content", "")
+        if isinstance(m, ToolMessage) and isinstance(content, str) and len(content) > 2000:
+            content = content[:2000] + "\n...[truncated tool output]..."
+        if isinstance(content, str):
+            content = content.strip()
+        if content:
+            lines.append(f"{role}: {content}")
+    return "\n".join(lines)
+
+
+# ============================
+# 5) Assistant node
+# ============================
 def make_assistant_node(tools):
-    """
-    We keep your model+prompt behavior, but bind the FULL tool set (local + MCP).
-    """
-    model = ChatOllama(
-        model="qc:latest",
-        temperature=0,
-        # base_url="http://localhost:11434",
-    ).bind_tools(tools)
-
+    model = ChatOllama(model=MODEL, temperature=0).bind_tools(tools)
     tools_description = textual_description_of_tools(tools)
 
-
-    SYSTEM_PROMPT_TEMPLATE = (
+    # NOTE: Keeping tool list in prompt can be huge with MCP tools.
+    # If you hit Ollama 500 again, comment out tools_description block.
+    BASE_SYSTEM_PROMPT_TEXT = (
         "You are a tool-using AI assistant.\n"
         "\n"
-        "AVAILABLE TOOLS:\n{tools_description}\n"
+        "AVAILABLE TOOLS:\n"
+        f"{tools_description}\n"
         "\n"
         "GENERAL OPERATING RULES:\n"
         "1) If the user request is short, ambiguous, or underspecified, DO NOT refuse.\n"
@@ -224,7 +271,7 @@ def make_assistant_node(tools):
         "   If you did not call a tool, DO NOT claim you did.\n"
         "\n"
         "4) Tool routing policy:\n"
-        "   a) Infer the user's intent (list, compare, rank, summarize, compute, etc.).\n"
+        "   a) Infer the user's intent (list, compare, rank, compute, etc.).\n"
         "   b) If the question concerns charity information, ALWAYS call get_charity_stats.\n"
         "   c) If uncertain which canonical tool name to use, choose the most general overview tool\n"
         "      (e.g., charity_address for listing charities).\n"
@@ -237,147 +284,180 @@ def make_assistant_node(tools):
         "6) Output policy:\n"
         "   Provide a direct answer to EACH part of the query.\n"
         "   Be concise, structured, and factual.\n"
-        "\n"
-        "Summary of conversation so far:\n{summary}"
     )
 
     def assistant_node(state: AgentState, config: RunnableConfig):
-        summary = state.get("summary", "")
-        system_message = SystemMessage(
-            content=SYSTEM_PROMPT_TEMPLATE.format(
-                tools_description=tools_description, summary=summary
+        summary = (state.get("summary") or "").strip()
+        system_text = BASE_SYSTEM_PROMPT_TEXT
+        if summary:
+            system_text += (
+                "\n\nMEMORY SUMMARY (compressed prior context; treat as long-term memory):\n"
+                f"{summary}\n"
             )
-        )
-        response = model.invoke([system_message] + list(state["messages"]), config=config)
-        return {"messages": [response]}
+
+        system_msg = SystemMessage(content=system_text)
+
+        # Ensure all message contents are strings for Ollama stability
+        msgs: List[BaseMessage] = [system_msg]
+        for m in list(state.get("messages", [])):
+            c = getattr(m, "content", "")
+            if not isinstance(c, str):
+                # Coerce structured content to json string
+                try:
+                    c = json.dumps(c, ensure_ascii=False)
+                except Exception:
+                    c = str(c)
+
+                if isinstance(m, HumanMessage):
+                    m = HumanMessage(content=c)
+                elif isinstance(m, SystemMessage):
+                    m = SystemMessage(content=c)
+                elif isinstance(m, ToolMessage):
+                    m = ToolMessage(content=c, tool_call_id=m.tool_call_id)
+                else:
+                    m = AIMessage(content=c)
+
+            msgs.append(m)
+
+        response = model.invoke(msgs, config=config)
+        tool_loops = int(state.get("tool_loops", 0))
+        if getattr(response, "tool_calls", None):
+            tool_loops += 1
+
+        return {"messages": [response], "tool_loops": tool_loops}
 
     return assistant_node
 
 
-def summarize_conversation(state: AgentState):
-    
-    # First, we get any existing summary
-    summary = state.get("summary", "")
-
-    # Create our summarization model
-    model = ChatOllama(model="qc:latest", temperature=0)
-
-    messages = state["messages"]
-
-    # We want to preserve the Initial User Prompt (messages[0])
-    # And the last 2 messages (messages[-2:])
-    # We summarize everything in betweeen (messages[1:-2])
-    
-    if len(messages) <= 3:
+# ============================
+# 6) Summarizer node (triggered by MAX_NUM_MSGS)
+# ============================
+def summarize_conversation(state: AgentState, config: RunnableConfig):
+    messages = list(state.get("messages", []))
+    if len(messages) <= MAX_NUM_MSGS:
         return {}
 
-    to_summarize = messages[1:-2]
+    existing = (state.get("summary") or "").strip()
 
-    # Generate a summary of the conversation so far
-    if summary:
-        
-        # If a summary already exists, we use a different prompt
-        summary_message = (
-            f"This is summary of the conversation to date: {summary}\n\n"
-            "Extend the summary by taking into account the new messages above:"
-        )
-        
-    else:
-        summary_message = "Create a summary of the conversation above:"
+    tail = _safe_tail(messages, KEEP_LAST_N)
+    head = messages[: max(0, len(messages) - len(tail))]
+    if not head:
+        return {}
 
-    # We invoke model with the messages to summarize + instruction
-    # Note: we construct a temp list for invoking the summarizer
-    summarizer_input = to_summarize + [HumanMessage(content=summary_message)]
-    response = model.invoke(summarizer_input)
-    
-    # We delete the messages we just summarized
-    delete_messages = [RemoveMessage(id=m.id) for m in to_summarize]
-    
-    return {"summary": response.content, "messages": delete_messages}
+    summarizer_model = ChatOllama(model=MODEl, temperature=0)
+
+    head_text = _format_for_summary(head)
+
+    summarizer_prompt = [
+        SystemMessage(content=(
+            "You are a memory summarizer for an LLM agent.\n"
+            "Update the existing memory summary using the new dialogue.\n"
+            "Rules:\n"
+            "- Keep durable facts, goals, constraints, decisions.\n"
+            "- Keep key tool findings (final numbers, top ranks, important URLs).\n"
+            "- Drop chit-chat and duplicates.\n"
+            "- Output 6–12 bullet points.\n"
+            "- Be concise.\n"
+        )),
+        HumanMessage(content=f"EXISTING SUMMARY:\n{existing if existing else '(none)'}"),
+        HumanMessage(content=f"NEW DIALOGUE:\n{head_text}"),
+    ]
+
+    resp = summarizer_model.invoke(summarizer_prompt, config=config)
+    new_summary = (resp.content or "").strip()
+    if not new_summary:
+        return {}
+
+    # Replace entire message history with only tail (safe) and store updated summary
+    return {
+        "summary": new_summary,
+        "messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *tail],
+    }
 
 
-def should_summarize(state: AgentState):
-    """Return the next node to execute."""
-    
-    messages = state["messages"]
-    
-    # If there are more than 6 messages, then we summarize the conversation
-    if len(messages) > 6:
-        return "summarize_conversation"
-    
+def should_summarize(state: AgentState) -> str:
+    # Trigger summarization strictly by MAX_NUM_MSGS
+    if len(list(state.get("messages", []))) > MAX_NUM_MSGS:
+        return "summarize"
+    return "assistant"
+
+
+
+def route_after_assistant(state: AgentState) -> str:
+    msgs = list(state.get("messages", []))
+    last = msgs[-1] if msgs else None
+
+    # If model wants tools
+    if last is not None and getattr(last, "tool_calls", None):
+        if int(state.get("tool_loops", 0)) >= MAX_TOOL_LOOPS:
+            return "summarize"   # break loop safely
+        return "tools"
+
+    # No tool calls: only summarize if threshold exceeded
+    if len(msgs) > MAX_NUM_MSGS:
+        return "summarize"
+
+    # Otherwise end this run
     return END
 
 
-
+# ============================
+# 7) Build graph (correct wiring!)
+# ============================
 async def build_graph():
     tools = await setup_tools()
 
     workflow = StateGraph(AgentState)
     workflow.add_node("assistant", make_assistant_node(tools))
     workflow.add_node("tools", ToolNode(tools))
-    workflow.add_node("summarize_conversation", summarize_conversation)
+    workflow.add_node("summarize", summarize_conversation)
 
     workflow.add_edge(START, "assistant")
 
-    # Route assistant -> tools if tool_calls exist, else END
+    # # assistant -> tools OR summarize (end-of-loop) -> (maybe assistant again)
+    # workflow.add_conditional_edges(
+    #     "assistant",
+    #     tools_condition,
+    #     {"tools": "tools", END: "summarize"},
+    # )
+
+    # After assistant responds, we check if it wants to call tools. If yes, route to tools node; if no, check if we need to summarize (based on MAX_NUM_MSGS). If summarization is triggered, we route to summarize node; if not, we loop back to assistant for the next turn. This allows for multi-turn interactions without summarization if the conversation is still short.
     workflow.add_conditional_edges(
-        "assistant",
-        tools_condition,
-        {"tools": "tools", END: END},
+    "assistant",
+    route_after_assistant,
+    {"tools": "tools", "summarize": "summarize"},
     )
 
-    workflow.add_conditional_edges(
-        "tools",
-        should_summarize,
-        {"summarize_conversation": "summarize_conversation", END: END},
-    )
-    
-    workflow.add_edge("summarize_conversation", "assistant")
-    
-    memory = MemorySaver()
-    
-    return workflow.compile(checkpointer=memory)
+
+    # CRITICAL: tools must go back to assistant so it can interpret tool outputs
+    workflow.add_edge("tools", "assistant")
+
+    # After summarization, go back to assistant (next tick) if you want multi-turn with same invoke,
+    # but for invoke/ainvoke it's fine to end here. We'll just end.
+    workflow.add_edge("summarize", END)
+
+    checkpointer = InMemorySaver()
+    return workflow.compile(checkpointer=checkpointer)
 
 
-
-
-
-# ----------------------------
-# 7) Run
-# ----------------------------
+# ============================
+# 8) Run
+# ============================
 async def main():
     graph = await build_graph()
 
-
-    # First turn
-    config = {"configurable": {"thread_id": "1"}}
-    
     query = (
-        " Find me all available charities, "
-        " Which charities have the highest donor count "
-        # " What are the mean and median of donor counts across charities, please calculate using python if needed, "
-        # " Provide info about charities from their websites, "
-        # " What kind of items do they provide, and what are the price descriptions for these items"
-        # " and summarize all this in 1 line."
+        "Find me all available charities, "
+        "Which charities have the highest donor count, "
+        "What are the mean and median of donor counts across charities, please calculate using python if needed, "
+        "Provide info about charities from their websites, "
+        "What kind of items do they provide, and what are the price descriptions for these items"
     )
-    
-    # print("\n\n--- TURN 1 ---")
-    # inputs = {"messages": [HumanMessage(content=query)]}
-    # async for event in graph.astream(inputs, config=config, stream_mode="values"):
-    #     if "messages" in event:
-    #         event["messages"][-1].pretty_print()
 
-    # # Second turn
-    # print("\n\n--- TURN 2 ---")
-    # query2 = "What did I just ask you about? Also, calculate the mean of donor counts."
-    # inputs2 = {"messages": [HumanMessage(content=query2)]}
-    # async for event in graph.astream(inputs2, config=config, stream_mode="values"):
-    #     if "messages" in event:
-    #         event["messages"][-1].pretty_print()
+    # NOTE: agent state uses `summary`
+    inputs = {"messages": [HumanMessage(content=query)], "summary": ""}
 
-
-    inputs = {"messages": [HumanMessage(content=query)], "memory_kv": ""}
-
+    # IMPORTANT: thread_id enables checkpointed memory across turns
     config: RunnableConfig = {"configurable": {"thread_id": "charity-demo-1"}}
 
     out_state = await graph.ainvoke(inputs, config=config)
@@ -388,6 +468,12 @@ async def main():
     print("-----------------------------------------------------------------------")
     console.print(Markdown(out_msg))
 
+    # Optional: show stored memory summary if summarization triggered
+    summary = (out_state.get("summary") or "").strip()
+    if summary:
+        print("\n\nMemory Summary Stored:")
+        print("-----------------------------------------------------------------------")
+        console.print(Markdown(summary))
 
 
 if __name__ == "__main__":

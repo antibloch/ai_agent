@@ -27,8 +27,8 @@ from langchain_experimental.tools import PythonREPLTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
 
-
 MODEL="qc:latest"
+
 
 def tool_to_text(t: Any) -> str:
     name = getattr(t, "name", t.__class__.__name__)
