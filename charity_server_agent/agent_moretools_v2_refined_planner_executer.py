@@ -37,6 +37,25 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 api_key = os.getenv("OPENROUTER_API_KEY")
 
 
+
+
+def format_msg(m: BaseMessage) -> str:
+    role = m.__class__.__name__
+    content = (getattr(m, "content", "") or "").strip()
+
+    # Tool calls (from AIMessage)
+    tool_calls = getattr(m, "tool_calls", None)
+    if tool_calls:
+        content += "\n\n[tool_calls]\n" + json.dumps(tool_calls, indent=2)
+
+    # ToolMessage has tool name/id info sometimes
+    tool_name = getattr(m, "name", None)
+    if tool_name:
+        content = f"[tool={tool_name}]\n{content}"
+
+    return f"{role}:\n{content}\n"
+
+
 # ----------------------------
 # Tool text helper (optional, for prompt clarity)
 # ----------------------------
@@ -102,6 +121,9 @@ class AgentState(TypedDict, total=False):
 
     completed: List[Tuple[str, str]]  # (step, result)
     final_answer: str
+
+    history_cursor: int  # index into messages list for incremental printing
+
 
 
 # ----------------------------
@@ -188,7 +210,7 @@ async def setup_tools():
 # ----------------------------
 # LLM helper
 # ----------------------------
-def make_model_chat(temperature: float, bind_tools: Optional[list] = None, choice: str="openrouter") -> ChatOpenAI:
+def make_model_chat(temperature: float, bind_tools: Optional[list] = None, choice: str="ollama") -> ChatOpenAI:
     if choice == "openrouter":
         chat = ChatOpenAI(
             # model="nvidia/nemotron-3-nano-30b-a3b:free",
@@ -203,6 +225,7 @@ def make_model_chat(temperature: float, bind_tools: Optional[list] = None, choic
     elif choice == "ollama": 
         chat = ChatOllama(
             model="qwen3.5:cloud", 
+            # model="qv:latest",
             temperature=temperature
             )
         if bind_tools:
@@ -315,33 +338,75 @@ def make_executor_model_node(tools):
 # ----------------------------
 # Advance node: record step result and move to next step
 # ----------------------------
+
+def format_message(m: BaseMessage) -> str:
+    role = m.__class__.__name__
+    content = (getattr(m, "content", "") or "").strip()
+
+    if isinstance(m, AIMessage):
+        tool_calls = getattr(m, "tool_calls", None)
+        if tool_calls:
+            content += "\n\n[tool_calls]\n" + json.dumps(tool_calls, indent=2)
+
+    if isinstance(m, ToolMessage):
+        tool_name = getattr(m, "name", None)
+        if tool_name:
+            content = f"[tool={tool_name}]\n{content}"
+
+    return f"{role}:\n{content}\n"
+
+
+
 def advance_node(state: AgentState) -> Dict[str, Any]:
     plan = state.get("plan", [])
     idx = int(state.get("step_idx", 0))
+
     if idx >= len(plan):
-        return {}
+        raise RuntimeError("advance_node called but no steps remain.")
 
     step = plan[idx]
+    msgs = list(state.get("messages", []))
+    cursor = int(state.get("history_cursor", 0))
 
-    # SECONDARY/ROBUSTNESS FIX:
-    # Grab the most recent AIMessage that has NO tool calls (the step's final result).
+    # ----------------------------------------------------
+    # 1️⃣ Log intermediate transcript for THIS step
+    # ----------------------------------------------------
+    print("\n\n============================================================")
+    print(f"[STEP {idx}] {step}")
+    print("------------------------------------------------------------")
+
+    for i in range(cursor, len(msgs)):
+        print(format_message(msgs[i]))
+
+    print("============================================================\n")
+
+    # ----------------------------------------------------
+    # 2️⃣ Extract final AI result (robust version)
+    # ----------------------------------------------------
     step_result = None
-    for m in reversed(list(state.get("messages", []))):
+    for m in reversed(msgs):
         if isinstance(m, AIMessage):
             tool_calls = getattr(m, "tool_calls", None)
-            if not tool_calls:
-                step_result = m.content
+            content = (m.content or "").strip()
+            if not tool_calls and content:
+                step_result = content
                 break
 
     if step_result is None:
-        step_result = "(No final step result was produced.)"
+        step_result = "(No valid final step result was produced.)"
 
+    # ----------------------------------------------------
+    # 3️⃣ Update structured state
+    # ----------------------------------------------------
     completed = state.get("completed", []) + [(step, step_result)]
+
     return {
         "completed": completed,
         "step_idx": idx + 1,
-        "current_step": None,  # reset so next step gets injected once
+        "current_step": None,
+        "history_cursor": len(msgs),  # 🔥 advance cursor
     }
+
 
 
 def should_continue(state: AgentState) -> str:
@@ -448,6 +513,7 @@ async def main():
         "completed": [],
         "final_answer": "",
         "messages": [],
+        "history_cursor": 0,
     }
 
     # IMPORTANT: async run so ToolNode uses tool.ainvoke for async-only tools (e.g., MCP)
@@ -458,6 +524,14 @@ async def main():
     print("\n\nAgent Final Response:")
     print("-----------------------------------------------------------------------")
     console.print(Markdown(out_msg))
+
+
+    print("\n\nConversation Transcript:")
+    print("======================================================================")
+    for i, m in enumerate(out.get("messages", [])):
+        print(f"--- #{i} -------------------------------------------------------------")
+        print(format_msg(m))
+
 
 
 if __name__ == "__main__":
