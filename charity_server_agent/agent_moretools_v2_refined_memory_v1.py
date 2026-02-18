@@ -361,24 +361,33 @@ async def main():
         # " and summarize all this in 1 line."
     )
     
-    print("\n\n--- TURN 1 ---")
-    inputs = {"messages": [HumanMessage(content=query)]}
-    async for event in graph.astream(inputs, config=config, stream_mode="values"):
-        if "messages" in event:
-            event["messages"][-1].pretty_print()
+    # print("\n\n--- TURN 1 ---")
+    # inputs = {"messages": [HumanMessage(content=query)]}
+    # async for event in graph.astream(inputs, config=config, stream_mode="values"):
+    #     if "messages" in event:
+    #         event["messages"][-1].pretty_print()
 
-    # Second turn
-    print("\n\n--- TURN 2 ---")
-    query2 = "What did I just ask you about? Also, calculate the mean of donor counts."
-    inputs2 = {"messages": [HumanMessage(content=query2)]}
-    async for event in graph.astream(inputs2, config=config, stream_mode="values"):
-        if "messages" in event:
-            event["messages"][-1].pretty_print()
+    # # Second turn
+    # print("\n\n--- TURN 2 ---")
+    # query2 = "What did I just ask you about? Also, calculate the mean of donor counts."
+    # inputs2 = {"messages": [HumanMessage(content=query2)]}
+    # async for event in graph.astream(inputs2, config=config, stream_mode="values"):
+    #     if "messages" in event:
+    #         event["messages"][-1].pretty_print()
 
-    # Option B: stream steps (uncomment to see tool/model turns)
-    # for step in graph.stream(inputs, stream_mode="values"):
-    #     msg = step["messages"][-1]
-    #     msg.pretty_print()
+
+    inputs = {"messages": [HumanMessage(content=query)], "memory_kv": ""}
+
+    config: RunnableConfig = {"configurable": {"thread_id": "charity-demo-1"}}
+
+    out_state = await graph.ainvoke(inputs, config=config)
+    out_msg = out_state["messages"][-1].content
+
+    console = Console()
+    print("\n\nAgent Final Response:")
+    print("-----------------------------------------------------------------------")
+    console.print(Markdown(out_msg))
+
 
 
 if __name__ == "__main__":
