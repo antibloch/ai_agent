@@ -40,7 +40,8 @@ from langchain_core.language_models.chat_models import BaseChatModel
 
 
 
-DEBUG_MESSAGES = 1
+DEBUG_MESSAGES = 1 # set to 1 to enable detailed debug prints, comment otherwise
+TRANSCRIPT_LIMIT = 15000  # character limit for transcript to be summarized
 
 def _extract_first_json_object(text: str) -> str:
     """Extract the first top-level JSON object from arbitrary text.
@@ -682,7 +683,7 @@ def summarize_step_transcript_llm(
 
         lines.append(f"{role}:\n{content}" if content else f"{role}:(empty)")
 
-    transcript = _safe_truncate("\n\n".join(lines), 6000)
+    transcript = _safe_truncate("\n\n".join(lines), TRANSCRIPT_LIMIT)
 
     system = SystemMessage(
         content=(
