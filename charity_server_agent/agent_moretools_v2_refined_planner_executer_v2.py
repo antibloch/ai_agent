@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+import time
 import requests
 from typing import Annotated, Sequence, TypedDict, Any, Dict, List, Tuple, Optional
 
@@ -33,8 +34,59 @@ from langchain_ollama import ChatOllama
 
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
+import re
+from langchain_core.exceptions import OutputParserException
+from langchain_core.language_models.chat_models import BaseChatModel
 
-api_key = os.getenv("OPENROUTER_API_KEY")
+
+
+def _extract_first_json_object(text: str) -> str:
+    """Extract the first top-level JSON object from arbitrary text.
+    Works even if the model adds <think>, markdown fences, or extra commentary.
+    """
+    if not text:
+        raise ValueError("Empty LLM output")
+
+    # Remove common wrappers (optional)
+    cleaned = text.strip()
+
+    # Try to find a fenced json block first
+    m = re.search(r"```(?:json)?\s*({.*?})\s*```", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+
+    # Otherwise, find the first balanced {...} object
+    start = cleaned.find("{")
+    if start == -1:
+        raise ValueError("No '{' found in LLM output")
+
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(cleaned)):
+        ch = cleaned[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        else:
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return cleaned[start : i + 1].strip()
+
+    raise ValueError("Unbalanced JSON braces in LLM output")
+
+
+
+
 
 
 
@@ -190,6 +242,66 @@ def build_local_tools():
     ]
 
 
+
+
+HINTS = {
+    "Python_REPL": (
+        "Only printed output is returned.\n"
+        "ALWAYS end your code with print(...) of the final result.\n"
+        "Prefer minimal Python; avoid heavy libraries unless necessary.\n"
+        "If computing statistics, print a compact JSON-like dict."
+    ),
+    "get_charity_stats": (
+        "Input must be EXACTLY one valid tool name string.\n"
+        "The response is JSON. The actual results are in the 'data' field.\n"
+        "Do not guess tool names — use only listed valid names."
+    ),
+    "fetch_url": (
+        "Use this when you already have a specific URL and need the page content.\n"
+        "Prefer this over web search when the task says 'read this URL' or 'extract details from this page'."
+    ),
+    "fetch_urls": (
+        "Fetch multiple URLs in one call when you need to read several pages quickly."
+    ),
+}
+
+
+def patch_tool_descriptions(tools: list) -> list:
+    """
+    Docstring for patch_tool_descriptions with additional hints for better performance
+    
+    :param tools: Description
+    :type tools: list
+    :return: Description
+    :rtype: list
+    """
+    patched_tools = []
+
+    for tool in tools:
+        name = getattr(tool, "name", tool.__class__.__name__)
+        original_desc = (getattr(tool, "description", "") or "").strip()
+
+        hint = HINTS.get(name)
+
+        if hint:
+            new_desc = (
+                original_desc
+                + "\n\nUSAGE HINTS:\n"
+                + hint
+            )
+
+            try:
+                tool.description = new_desc
+            except Exception:
+                # Some tools may not allow mutation (StructuredTool edge cases)
+                pass
+
+        patched_tools.append(tool)
+
+    return patched_tools
+
+
+
 async def setup_tools():
     local_tools = build_local_tools()
 
@@ -210,8 +322,9 @@ async def setup_tools():
 # ----------------------------
 # LLM helper
 # ----------------------------
-def make_model_chat(temperature: float, bind_tools: Optional[list] = None, choice: str="ollama") -> ChatOpenAI:
+def make_model_chat(temperature: float, bind_tools: Optional[list] = None, choice: str="ollama") -> BaseChatModel:
     if choice == "openrouter":
+        api_key = os.getenv("OPENROUTER_API_KEY")
         chat = ChatOpenAI(
             # model="nvidia/nemotron-3-nano-30b-a3b:free",
             model = "qwen/qwen3-coder:free",
@@ -224,8 +337,8 @@ def make_model_chat(temperature: float, bind_tools: Optional[list] = None, choic
 
     elif choice == "ollama": 
         chat = ChatOllama(
-            # model="qwen3.5:cloud", 
-            model="qwen:latest",
+            model="qwen3.5:cloud", 
+            # model="qwen:latest",
             temperature=temperature
             )
         if bind_tools:
@@ -240,49 +353,73 @@ def make_model_chat(temperature: float, bind_tools: Optional[list] = None, choic
 # Planner node
 # ----------------------------
 def make_planner_node(tools):
-    model = make_model_chat(temperature=0.3)
+    model = make_model_chat(temperature=0.0)  # important: reduce drift
     parser = PydanticOutputParser(pydantic_object=Plan)
-
     tools_description = textual_description_of_tools(tools)
 
     system = SystemMessage(
         content=(
             "You are a planner. Break the user's request into a short sequence of steps.\n"
             "Rules:\n"
-            "- Output ONLY valid JSON that matches the schema.\n"
-            "- Steps should be actionable and reference tools if relevant, but do NOT run tools.\n"
-            "- CRITICAL: cover EVERY distinct user sub-request explicitly. If the user asks 3 things, the plan must include steps for all 3.\n"
-            "- If the user asks to 'find all available charities', include a step that explicitly enumerates them.\n"
+            "- Return ONLY a JSON object. No markdown, no code fences, no <think>.\n"
+            "- The JSON must match the schema exactly.\n"
+            "- Steps should be concrete, ordered, and cover ALL parts of the request.\n"
             f"{parser.get_format_instructions()}\n"
             "AVAILABLE TOOLS:\n"
             f"{tools_description}"
         )
     )
 
-
-    # This is the stable executor system message (kept in transcript)
     exec_system = SystemMessage(
         content=(
             "You are a tool-using execution agent.\n"
             "You will be given ONE plan step at a time.\n"
-            "Goal: solve the CURRENT step fully, using tools as needed.\n"
-            "When a tool returns results, incorporate them and either call another tool or provide the step's final result.\n"
+            "Solve the CURRENT step fully. Use tools as needed.\n"
             "If you did not call a tool, DO NOT claim you did.\n"
-            "Keep step results concise and factual.\n"
         )
     )
 
+    def _parse_plan_with_retries(raw: str, user_query: str, config: RunnableConfig) -> Plan:
+        # 1) try direct parse
+        try:
+            return parser.parse(raw)
+        except Exception:
+            pass
+
+        # 2) try extracting JSON object and parsing that
+        try:
+            json_str = _extract_first_json_object(raw)
+            return parser.parse(json_str)
+        except Exception:
+            pass
+
+        # 3) ask model to re-emit ONLY JSON (1 retry)
+        repair_prompt = HumanMessage(
+            content=(
+                "Your previous output was invalid.\n"
+                "Re-output ONLY the JSON object that matches the schema. No extra text.\n\n"
+                f"USER QUERY:\n{user_query}\n\n"
+                "Return ONLY JSON now."
+            )
+        )
+        repaired = model.invoke([system, repair_prompt], config=config).content
+        try:
+            json_str = _extract_first_json_object(repaired)
+            return parser.parse(json_str)
+        except Exception as e:
+            # 4) last-resort fallback: 1-step plan
+            return Plan(steps=[f"Answer the user query directly: {user_query}"])
+
     def planner_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
         raw = model.invoke([system, HumanMessage(content=state["user_query"])], config=config).content
-        plan_obj = parser.parse(raw)
+        plan_obj = _parse_plan_with_retries(raw, state["user_query"], config)
 
-        # IMPORTANT: include the original user query in the executor transcript ONCE
-        # so the executor always has global context without repeating it per tool loop.
         return {
             "plan": plan_obj.steps,
             "step_idx": 0,
             "current_step": None,
             "completed": [],
+            "history_cursor": 0,  # if you're using step logging
             "messages": [
                 exec_system,
                 HumanMessage(content=f"USER QUERY (global context):\n{state['user_query']}"),
@@ -292,28 +429,36 @@ def make_planner_node(tools):
     return planner_node
 
 
+
 # ----------------------------
 # Executor model node
 # ----------------------------
 def make_executor_model_node(tools):
     model = make_model_chat(temperature=0.3, bind_tools=tools)
 
+    # A small “post-tool” nudge that prevents empty AIMessage after ToolMessage
+    POST_TOOL_NUDGE = (
+        "Tool result received.\n"
+        "Now write the final result for THIS plan step in plain text.\n"
+        "- Do NOT call more tools unless strictly necessary.\n"
+        "- Be concise and specific.\n"
+    )
+
     def executor_model_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
         plan = state.get("plan", [])
         idx = int(state.get("step_idx", 0))
-
         if idx >= len(plan):
             return {}
 
         step = plan[idx]
         msgs = list(state.get("messages", []))
 
-        # MAIN FLOW FIX:
-        # Inject the step instruction ONCE per step (not on every tool loop).
         starting_new_step = (state.get("current_step") != step)
 
         new_messages: List[BaseMessage] = []
+
         if starting_new_step:
+            # Inject the step instruction ONCE per step
             new_messages.append(
                 HumanMessage(
                     content=(
@@ -323,13 +468,19 @@ def make_executor_model_node(tools):
                     )
                 )
             )
+        else:
+            # We are in the tool-loop for the SAME step.
+            # If the last message is a ToolMessage, force the model to produce the step result.
+            last = msgs[-1] if msgs else None
+            if isinstance(last, ToolMessage):
+                new_messages.append(HumanMessage(content=POST_TOOL_NUDGE))
 
-        # If continuing after tools, do NOT repeat the step instruction.
         ai = model.invoke(msgs + new_messages, config=config)
 
         out: Dict[str, Any] = {"messages": [*new_messages, ai]}
         if starting_new_step:
             out["current_step"] = step
+
         return out
 
     return executor_model_node
@@ -375,8 +526,8 @@ def advance_node(state: AgentState) -> Dict[str, Any]:
     print(f"[STEP {idx}] {step}")
     print("------------------------------------------------------------")
 
-    for i in range(cursor, len(msgs)):
-        print(format_message(msgs[i]))
+    # for i in range(cursor, len(msgs)):
+    #     print(format_message(msgs[i]))
 
     print("============================================================\n")
 
@@ -400,11 +551,19 @@ def advance_node(state: AgentState) -> Dict[str, Any]:
     # ----------------------------------------------------
     completed = state.get("completed", []) + [(step, step_result)]
 
+    # --- DEBUG: dump full messages list at step end ---
+    print("\n[DEBUG] state['messages'] at END of step")
+    print(f"Total messages: {len(msgs)}")
+    for j, m in enumerate(msgs):
+        print(f"\n--- msg[{j}] ---")
+        print(format_message(m))
+
+
     return {
         "completed": completed,
         "step_idx": idx + 1,
         "current_step": None,
-        "history_cursor": len(msgs),  # 🔥 advance cursor
+        "history_cursor": len(msgs),  # advance cursor
     }
 
 
@@ -427,29 +586,51 @@ def executor_routing(state: AgentState) -> str:
 # Finalizer node
 # ----------------------------
 def make_finalizer_node():
-    model = make_model_chat(temperature=0.2)
+    model = make_model_chat(temperature=0.0)
 
-    system = SystemMessage(
-        content=(
-            "You are a finalizer.\n"
-            "Produce the final answer to the user.\n"
-            "Use ONLY the executed step results provided.\n"
-            "If something is missing/insufficient, say so and explain what is missing.\n"
-            "Keep it concise.\n"
-        )
-    )
+    FINALIZER_SYSTEM_PROMPT = """\
+You are the finalizer.
+
+Task: Write the final user answer by summarizing the executed (step, result) list.
+
+Rules:
+- Output only the final answer (no analysis / meta / self-talk; no tool mentions).
+- Use only the provided step results; do not add new facts.
+- Organize by user sub-questions as short headings with bullet points.
+- If any requested part is not supported by the step results, add a final "Missing" section listing what’s missing (1 line each). Otherwise omit "Missing".
+- If multiple step results repeat the same info, deduplicate and keep the clearest/latest.
+"""
+
+    system = SystemMessage(content=FINALIZER_SYSTEM_PROMPT)
 
     def finalizer_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
-        executed = "\n".join([f"- Step: {s}\n  Result: {r}" for s, r in state.get("completed", [])])
+        completed = state.get("completed", []) or []
+        executed = "\n".join([f"- Step: {s}\n  Result: {r}" for s, r in completed])
+
         msg = HumanMessage(
             content=(
-                f"USER QUERY:\n{state['user_query']}\n\n"
+                f"USER QUERY:\n{state.get('user_query','')}\n\n"
                 f"EXECUTED STEPS + RESULTS:\n{executed}\n\n"
-                "FINAL ANSWER:"
+                "Write the final answer now."
             )
         )
-        final = model.invoke([system, msg], config=config).content
-        return {"final_answer": final}
+
+        ai = model.invoke([system, msg], config=config)
+        final = (ai.content or "").strip()
+
+        # Retry once if empty (common intermittent behavior in some Ollama setups)
+        if not final:
+            retry = HumanMessage(
+                content="Your last answer was empty. Output the final answer as plain text now."
+            )
+            ai2 = model.invoke([system, msg, retry], config=config)
+            final = (ai2.content or "").strip()
+
+            # Keep the finalizer transcript for debugging if needed
+            return {"messages": [msg, ai, retry, ai2], "final_answer": final}
+
+        # Keep the finalizer transcript for debugging if needed
+        return {"messages": [msg, ai], "final_answer": final}
 
     return finalizer_node
 
@@ -459,6 +640,9 @@ def make_finalizer_node():
 # ----------------------------
 async def build_graph():
     tools = await setup_tools()
+
+    # add hints to tool descriptions to improve performance
+    tools = patch_tool_descriptions(tools)
 
     workflow = StateGraph(AgentState)
 
@@ -497,6 +681,7 @@ async def build_graph():
 # Run
 # ----------------------------
 async def main():
+    start_time = time.time()
     graph = await build_graph()
 
     query = (
@@ -521,16 +706,20 @@ async def main():
     out_msg = out.get("final_answer", "")
 
     console = Console()
-    print("\n\nAgent Final Response:")
+    print("\n\n\nAgent Final Response:")
     print("-----------------------------------------------------------------------")
     console.print(Markdown(out_msg))
 
 
-    print("\n\nConversation Transcript:")
-    print("======================================================================")
-    for i, m in enumerate(out.get("messages", [])):
-        print(f"--- #{i} -------------------------------------------------------------")
-        print(format_msg(m))
+    # print("\n\nConversation Transcript:")
+    # print("======================================================================")
+    # for i, m in enumerate(out.get("messages", [])):
+    #     print(f"--- #{i} -------------------------------------------------------------")
+    #     print(format_msg(m))
+
+    end_time = time.time()
+    elapsed = end_time - start_time
+    print(f"\n\n**Total elapsed time**: {elapsed:.2f} seconds")
 
 
 
