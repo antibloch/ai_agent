@@ -114,8 +114,11 @@ def textual_description_of_tools(tools) -> str:
 
 
 class AgentState(TypedDict):
-    messages: Annotated[Sequence[BaseMessage], add_messages]
+    # Dynamic system prompt per invocation (so we can inject past turn context)
+    system_prompt: str
 
+    # Normal LangGraph message history for THIS invocation only
+    messages: Annotated[Sequence[BaseMessage], add_messages]
 
 
 
@@ -295,55 +298,88 @@ async def setup_tools():
 
 
 
-def make_assistant_node(tools):
+def get_last_final_ai_text(messages: Sequence[BaseMessage]) -> str:
     """
-    We keep your model+prompt behavior, but bind the FULL tool set (local + MCP).
+    Returns the last AI message content that is not a tool-call instruction.
+    (In many runs, the last AIMessage is already the final. This is a bit safer.)
     """
-    model = make_model_chat(temperature=0.0, bind_tools=tools)
+    for m in reversed(messages):
+        if isinstance(m, AIMessage):
+            tool_calls = getattr(m, "tool_calls", None)
+            if tool_calls:
+                continue
+            return (m.content or "").strip()
+    # fallback
+    for m in reversed(messages):
+        if isinstance(m, AIMessage):
+            return (m.content or "").strip()
+    return ""
 
+
+def build_system_prompt_with_last_turn(base_system_prompt: str, prev_user_query: str, prev_final_answer: str) -> str:
+    """
+    Inject ONLY (prev_user_query, prev_final_answer) into the system prompt.
+    No full transcript is provided.
+    """
+    prev_user_query = (prev_user_query or "").strip()
+    prev_final_answer = (prev_final_answer or "").strip()
+
+    injection = (
+        "\n\n"
+        "PAST TURN CONTEXT (for continuity; not a full transcript):\n"
+        f"- Previous user query:\n{prev_user_query}\n"
+        f"- Your previous final answer:\n{prev_final_answer}\n"
+        "\n"
+        "Use this context to stay consistent. Do NOT mention this block unless the user asks.\n"
+    )
+    return base_system_prompt + injection
+
+
+
+def make_assistant_node(tools):
+    model = make_model_chat(temperature=0.0, bind_tools=tools)
     tools_description = textual_description_of_tools(tools)
 
-    SYSTEM_PROMPT = SystemMessage(
-                        content=(
-                            "You are a tool-using AI assistant.\n"
-                            "\n"
-                            "AVAILABLE TOOLS:\n" + tools_description +
-                            "\n"
-                            "GENERAL OPERATING RULES:\n"
-                            "1) If the user request is short, ambiguous, or underspecified, DO NOT refuse.\n"
-                            "   First rewrite the request internally into a clearer, measurable objective.\n"
-                            "   Then proceed.\n"
-                            "\n"
-                            "2) Every part of the user's request MUST be addressed.\n"
-                            "   If multiple steps are required, perform them sequentially.\n"
-                            "\n"
-                            "3) All factual claims about charities MUST be grounded in get_charity_stats tool output.\n"
-                            "   If you did not call a tool, DO NOT claim you did.\n"
-                            "\n"
-                            "4) Tool routing policy:\n"
-                            "   a) Infer the user's intent (list, compare, rank, summarize, compute, etc.).\n"
-                            "   b) If the question concerns charity information, ALWAYS call get_charity_stats.\n"
-                            "   c) If uncertain which canonical tool name to use, choose the most general overview tool\n"
-                            "      (e.g., charity_address for listing charities).\n"
-                            "   d) Use the MINIMUM number of tool calls required.\n"
-                            "\n"
-                            "5) Clarification policy:\n"
-                            "   If the request cannot be uniquely resolved, ask ONE precise clarification question,\n"
-                            "   but ALSO provide a best-effort answer using the most relevant available tool.\n"
-                            "\n"
-                            "6) Output policy:\n"
-                            "   Provide a direct answer to EACH part of the query.\n"
-                            "   Be concise, structured, and factual.\n"
-                            )
-                        )
-    
+    BASE_SYSTEM_PROMPT_TEXT = (
+        "You are a tool-using AI assistant.\n"
+        "\n"
+        "AVAILABLE TOOLS:\n" + tools_description +
+        "\n"
+        "GENERAL OPERATING RULES:\n"
+        "1) If the user request is short, ambiguous, or underspecified, DO NOT refuse.\n"
+        "   First rewrite the request internally into a clearer, measurable objective.\n"
+        "   Then proceed.\n"
+        "\n"
+        "2) Every part of the user's request MUST be addressed.\n"
+        "   If multiple steps are required, perform them sequentially.\n"
+        "\n"
+        "3) All factual claims about charities MUST be grounded in get_charity_stats tool output.\n"
+        "   If you did not call a tool, DO NOT claim you did.\n"
+        "\n"
+        "4) Tool routing policy:\n"
+        "   a) Infer the user's intent (list, compare, rank, summarize, compute, etc.).\n"
+        "   b) If the question concerns charity information, ALWAYS call get_charity_stats.\n"
+        "   c) If uncertain which canonical tool name to use, choose the most general overview tool\n"
+        "      (e.g., charity_address for listing charities).\n"
+        "   d) Use the MINIMUM number of tool calls required.\n"
+        "\n"
+        "5) Clarification policy:\n"
+        "   If the request cannot be uniquely resolved, ask ONE precise clarification question,\n"
+        "   but ALSO provide a best-effort answer using the most relevant available tool.\n"
+        "\n"
+        "6) Output policy:\n"
+        "   Provide a direct answer to EACH part of the query.\n"
+        "   Be concise, structured, and factual.\n"
+    )
 
 
     def assistant_node(state: AgentState, config: RunnableConfig):
-        response = model.invoke([SYSTEM_PROMPT] + list(state["messages"]), config=config)
+        sys_text = state.get("system_prompt") or BASE_SYSTEM_PROMPT_TEXT
+        system_msg = SystemMessage(content=sys_text)
+        response = model.invoke([system_msg] + list(state["messages"]), config=config)
         return {"messages": [response]}
 
-    return assistant_node, SYSTEM_PROMPT
+    return assistant_node, BASE_SYSTEM_PROMPT_TEXT
 
 
 
@@ -351,7 +387,7 @@ async def build_graph():
     tools = await setup_tools()
     tools = patch_tool_descriptions(tools)
 
-    assistant_node, system_prompt = make_assistant_node(tools)
+    assistant_node, base_system_prompt_text = make_assistant_node(tools)
 
     workflow = StateGraph(AgentState)
     workflow.add_node("assistant", assistant_node)
@@ -359,7 +395,6 @@ async def build_graph():
 
     workflow.add_edge(START, "assistant")
 
-    # Route assistant -> tools if tool_calls exist, else END
     workflow.add_conditional_edges(
         "assistant",
         tools_condition,
@@ -368,7 +403,7 @@ async def build_graph():
 
     workflow.add_edge("tools", "assistant")
     graph = workflow.compile()
-    return graph, system_prompt
+    return graph, base_system_prompt_text
 
 
 
@@ -392,46 +427,80 @@ def format_message(m: BaseMessage) -> str:
 # ----------------------------
 # 7) Run
 # ----------------------------
-async def main():
-    start_time = time.time()
-    graph, system_prompt = await build_graph()
-
-    print("\n--- SYSTEM PROMPT ---\n")
-    print(format_message(system_prompt))
-    print("---------------------\n")
-
-
-    query = (
-        " Find me all available charities, "
-        " Which charities have the highest donor count, "
-        " What are the mean and median of donor counts across charities, please calculate using python if needed, "
-        # " Provide info about charities from their websites, "
-        # " What kind of items do they provide, and what are the price descriptions for these items"
-        # " and summarize all this in 1 line."
-    )
-
-    inputs = {"messages": [HumanMessage(content=query)]}
+async def run_one_query(graph, system_prompt_text: str, query: str) -> Tuple[List[BaseMessage], str]:
+    """
+    Runs a single graph invocation with a given system prompt and returns:
+      - all messages produced in this invocation
+      - the final AI answer text
+    """
+    inputs = {
+        "system_prompt": system_prompt_text,
+        "messages": [HumanMessage(content=query)],
+    }
 
     cursor = 0
+    last_msgs: List[BaseMessage] = []
 
     async for step in graph.astream(inputs, stream_mode="values"):
         msgs = list(step.get("messages", []))
+        last_msgs = msgs
 
-        # print only new messages since last step
         for m in msgs[cursor:]:
             print(format_message(m))
 
         cursor = len(msgs)
 
-    # final answer is last AIMessage
-    final = msgs[-1].content if msgs else ""
-    console = Console()
-    print("\nAgent Final Response:\n-----------------------")
-    console.print(Markdown(final))
+    final_text = get_last_final_ai_text(last_msgs)
+    return last_msgs, final_text
 
-    end_time = time.time()
-    elapsed = end_time - start_time
+
+async def main():
+    start_time = time.time()
+    graph, base_system_prompt_text = await build_graph()
+
+    # -------------------------
+    # Query #1
+    # -------------------------
+    query1 = (
+        "Find me all available charities, "
+        "Which charities have the highest donor count, "
+        "What are the mean and median of donor counts across charities, please calculate using python if needed."
+    )
+
+    print("\n====================")
+    print("RUN #1")
+    print("====================\n")
+    msgs1, final1 = await run_one_query(graph, base_system_prompt_text, query1)
+
+    console = Console()
+    print("\nAgent Final Response (Run #1):\n-----------------------")
+    console.print(Markdown(final1))
+
+    # -------------------------
+    # Query #2 (inject only (query1, final1) into System prompt)
+    # -------------------------
+    query2 = (
+        "Now based on the charities you found, list each charity with its address "
+        "and briefly suggest which one is best for a donor who wants maximum reach."
+    )
+
+    system_prompt_round2 = build_system_prompt_with_last_turn(
+        base_system_prompt_text,
+        prev_user_query=query1,
+        prev_final_answer=final1,
+    )
+
+    print("\n====================")
+    print("RUN #2 (with injected last turn only)")
+    print("====================\n")
+    msgs2, final2 = await run_one_query(graph, system_prompt_round2, query2)
+
+    print("\nAgent Final Response (Run #2):\n-----------------------")
+    console.print(Markdown(final2))
+
+    elapsed = time.time() - start_time
     print(f"\n\n**Total elapsed time**: {elapsed:.2f} seconds")
+
 
 if __name__ == "__main__":
     asyncio.run(main())
