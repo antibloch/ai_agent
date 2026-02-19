@@ -468,6 +468,10 @@ async def run_one_query(graph, system_prompt_text: str, query: str, run_label: s
 
 
 
+def clip(text: str, max_chars: int = 1500) -> str:
+    text = (text or "").strip()
+    return text if len(text) <= max_chars else text[:max_chars] + "\n...[clipped]..."
+
 async def main():
     start_time = time.time()
     graph, base_system_prompt_text = await build_graph()
@@ -514,6 +518,7 @@ async def main():
 
         # Append THIS run's (query, final answer) so it appears in the next run's prompt
         history.append((query, final))
+        # history.append((clip(query, 800), clip(final, 2000)))    # if want to clip
 
     elapsed = time.time() - start_time
     print(f"\n\n**Total elapsed time**: {elapsed:.2f} seconds")
