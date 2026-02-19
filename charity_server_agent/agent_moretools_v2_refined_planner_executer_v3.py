@@ -455,11 +455,11 @@ def make_executor_model_node(tools):
 
     EMPTY_OUTPUT_NUDGE = (
         "Your last message was empty.\n"
-        "For the current plan step, do ONE of the following:\n"
-        "1) Call the appropriate tool(s), OR\n"
-        "2) Write the final result for this step in plain text.\n"
+        "You MUST now produce the final answer for this plan step in plain text.\n"
+        "Do not call tools unless absolutely required.\n"
         "Do not output an empty message."
     )
+
 
     def executor_model_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
         plan = state.get("plan", [])
@@ -487,7 +487,8 @@ def make_executor_model_node(tools):
                 content=(
                     "PLAN STEP (execute only this step):\n"
                     f"{step}\n\n"
-                    "If needed, call tools. Otherwise, provide the final result for this step."
+                    "If needed, call tools. Otherwise, you MUST produce a clear final answer in plain text. Do not output an empty message."
+
                 )
             )
             new_messages.append(plan_step_msg)
@@ -516,6 +517,20 @@ def make_executor_model_node(tools):
             model_input = msgs_prompt + current_step_msgs + new_messages
 
         ai = model.invoke(model_input, config=config)
+
+        content = (ai.content or "").strip()
+        has_tools = bool(getattr(ai, "tool_calls", None))
+
+        if (not has_tools) and (not content):
+            # Retry once with a strong nudge
+            retry = HumanMessage(content=EMPTY_OUTPUT_NUDGE)
+            ai2 = model.invoke(model_input + [retry], config=config)
+            ai2_content = (ai2.content or "").strip()
+            ai2_has_tools = bool(getattr(ai2, "tool_calls", None))
+
+            # Append retry + ai2 into full transcript
+            out["messages"] = [*new_messages, ai, retry, ai2]
+            return out
 
         # Append new messages + ai to the FULL transcript
         out["messages"] = [*new_messages, ai]
@@ -645,22 +660,27 @@ def make_advance_node(summarizer: BaseChatModel):
         msgs_prompt = list(state.get("prompt_messages", [])) # compact prompt base
 
         # 1) Extract final natural-language AI result for THIS step from FULL transcript
-        step_result = None
-        for m in reversed(msgs_full):
-            if isinstance(m, AIMessage):
-                tool_calls = getattr(m, "tool_calls", None)
-                content = (m.content or "").strip()
-                if not tool_calls and content:
-                    step_result = content
-                    break
-        if step_result is None:
-            step_result = "(No valid final step result was produced.)"
-
-        completed = state.get("completed", []) + [(step, step_result)]
-
-        # 2) Slice out ONLY this step's transcript from FULL transcript
         step_start_idx = int(state.get("step_start_idx", 2))
         step_msgs = msgs_full[step_start_idx:]
+
+        step_result = None
+
+        # Only inspect THIS step's messages
+        for m in reversed(step_msgs):
+            if isinstance(m, AIMessage):
+                content = (m.content or "").strip()
+                tool_calls = getattr(m, "tool_calls", None)
+
+                # Must be a final natural-language result
+                if content and not tool_calls:
+                    step_result = content
+                    break
+
+        if not step_result:
+            step_result = "(No valid final step result was produced.)"
+
+
+        completed = state.get("completed", []) + [(step, step_result)]
 
 
         # DEBUG: print exactly what you want
@@ -734,22 +754,6 @@ def make_advance_node(summarizer: BaseChatModel):
 
 
 
-
-def should_continue(state: AgentState) -> str:
-    plan = state.get("plan", [])
-    idx = int(state.get("step_idx", 0))
-    return "executor_model" if idx < len(plan) else "finalizer"
-
-
-def executor_routing(state: AgentState) -> str:
-    msgs = list(state.get("messages", []))
-    last = msgs[-1] if msgs else None
-    if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
-        return "tools"
-    return "advance"
-
-
-
 # ----------------------------
 # Finalizer node
 # ----------------------------
@@ -801,6 +805,30 @@ def make_finalizer_node():
         return {"messages": [msg, ai], "final_answer": final}
 
     return finalizer_node
+
+
+
+
+
+def should_continue(state: AgentState) -> str:
+    plan = state.get("plan", [])
+    idx = int(state.get("step_idx", 0))
+    return "executor_model" if idx < len(plan) else "finalizer"
+
+
+def executor_routing(state: AgentState) -> str:
+    msgs = list(state.get("messages", []))
+    last = msgs[-1] if msgs else None
+
+    if isinstance(last, AIMessage):
+        if getattr(last, "tool_calls", None):
+            return "tools"
+
+        # NEW: prevent advancing on empty final
+        if not (last.content or "").strip():
+            return "executor_model"
+
+    return "advance"
 
 
 # ----------------------------
