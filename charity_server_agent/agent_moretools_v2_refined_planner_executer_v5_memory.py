@@ -390,20 +390,6 @@ def make_planner_node(tools):
     parser = PydanticOutputParser(pydantic_object=Plan)
     tools_description = textual_description_of_tools(tools)
 
-    PLANNER_SYSTEM_TEMPLATE = (
-        "You are a planner. Break the user's request into a short sequence of steps.\n"
-        "Rules:\n"
-        "- Return ONLY a JSON object. No markdown, no code fences, no <think>.\n"
-        "- The JSON must match the schema exactly.\n"
-        "- Steps should be concrete, ordered, and cover ALL parts of the request.\n"
-        f"{parser.get_format_instructions()}\n\n"
-        "PAST_CONTEXT (previous turns; use only if relevant):\n"
-        "{past_context}\n\n"
-        "AVAILABLE TOOLS:\n"
-        f"{tools_description}"
-    )
-
-
     EXEC_SYSTEM_TEMPLATE = (
         "You are a tool-using execution agent.\n"
         "You will be given ONE plan step at a time.\n"
@@ -413,8 +399,7 @@ def make_planner_node(tools):
         "{past_context}\n"
     )
 
-
-    def _parse_plan_with_retries(raw: str, user_query: str, config: RunnableConfig) -> Plan:
+    def _parse_plan_with_retries(raw: str, user_query: str, config: RunnableConfig, planner_system: SystemMessage) -> Plan:
         def dbg(msg: str) -> None:
             if DEBUG_MESSAGES == 1:
                 print(f"[planner.parse] {msg}")
@@ -450,7 +435,7 @@ def make_planner_node(tools):
         )
         dbg("Requesting JSON repair (one retry).")
 
-        repaired_msg = model.invoke([system, repair_prompt], config=config)
+        repaired_msg = model.invoke([planner_system, repair_prompt], config=config)
         repaired = (repaired_msg.content or "")
         dbg(f"Repair raw length: {len(repaired.strip())}")
 
@@ -469,40 +454,49 @@ def make_planner_node(tools):
         except Exception as e:
             dbg(f"Repair parse: FAIL ({type(e).__name__}: {e})")
 
-        # 4) last-resort fallback: 1-step plan
+        # 4) last-resort fallback
         dbg("FALLBACK: Using 1-step plan.")
         return Plan(steps=[f"Answer the user query directly: {user_query}"])
 
-
-
     def planner_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
-
         user_query = state["user_query"]
-
-        # Build planner input
-        planner_input = [system, HumanMessage(content=user_query)]
-
         past_context = format_past_context(state.get("past_turns", []))
-        system = SystemMessage(content=PLANNER_SYSTEM_TEMPLATE.format(
-            past_context=past_context if past_context else "(none)"
-        ))
+        past_context_text = past_context if past_context else "(none)"
 
-        exec_system = SystemMessage(content=EXEC_SYSTEM_TEMPLATE.format(
-            past_context=past_context if past_context else "(none)"
-        ))
+        # IMPORTANT: build via concatenation to avoid `.format()` brace collisions
+        planner_system_text = (
+            "You are a planner. Break the user's request into a short sequence of steps.\n"
+            "Rules:\n"
+            "- Return ONLY a JSON object. No markdown, no code fences, no <think>.\n"
+            "- The JSON must match the schema exactly.\n"
+            "- Steps should be concrete, ordered, and cover ALL parts of the request.\n"
+            "\n"
+            + parser.get_format_instructions()
+            + "\n\n"
+            "PAST_CONTEXT (previous turns; use only if relevant):\n"
+            + past_context_text
+            + "\n\n"
+            "AVAILABLE TOOLS:\n"
+            + tools_description
+        )
+        planner_system = SystemMessage(content=planner_system_text)
 
+        # exec_system still uses `.format()` safely because it contains no JSON braces
+        exec_system = SystemMessage(
+            content=EXEC_SYSTEM_TEMPLATE.format(past_context=past_context_text)
+        )
 
-        # Call model
+        planner_input = [planner_system, HumanMessage(content=user_query)]
+
+        # Call model with bounded retry (empty outputs)
         raw = ""
         for attempt in range(3):
-            raw = (model.invoke([system, HumanMessage(content=user_query)], config=config).content or "").strip()
+            raw = (model.invoke(planner_input, config=config).content or "").strip()
             if raw:
                 break
             if DEBUG_MESSAGES == 1:
                 print(f"[planner] Empty output attempt {attempt+1}/3")
 
-
-        # Debug: show planner input + raw output
         if DEBUG_MESSAGES == 1:
             print("\n\n============================================================")
             print("PLANNER INPUT")
@@ -517,10 +511,8 @@ def make_planner_node(tools):
             print(raw)
             print("============================================================\n")
 
-        plan_obj = _parse_plan_with_retries(raw, state["user_query"], config)
+        plan_obj = _parse_plan_with_retries(raw, user_query, config, planner_system)
 
-
-        # Debug: show parsed steps
         if DEBUG_MESSAGES == 1:
             print("------------------------------------------------------------")
             print("PLANNER PARSED STEPS")
@@ -528,7 +520,6 @@ def make_planner_node(tools):
             for i, step in enumerate(plan_obj.steps):
                 print(f"[{i}] {step}")
             print("============================================================\n")
-
 
         return {
             "plan": plan_obj.steps,
@@ -538,14 +529,9 @@ def make_planner_node(tools):
             "history_cursor": 0,
             "context_summaries": [],
             "step_start_idx": 1,  # base is now [exec_system] only
-            "messages": [
-                exec_system,
-            ],
-            "prompt_messages": [
-                exec_system,
-            ],
+            "messages": [exec_system],
+            "prompt_messages": [exec_system],
         }
-
 
     return planner_node
 
@@ -1036,7 +1022,6 @@ async def main():
     print("\n\n\nAgent Final Response:")
     print("-----------------------------------------------------------------------")
     console.print(Markdown(out_msg))
-
     print("-----------------------------------------------------------------------")
 
 
