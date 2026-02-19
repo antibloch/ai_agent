@@ -40,6 +40,8 @@ from langchain_core.language_models.chat_models import BaseChatModel
 
 
 
+DEBUG_MESSAGES = 1
+
 def _extract_first_json_object(text: str) -> str:
     """Extract the first top-level JSON object from arbitrary text.
     Works even if the model adds <think>, markdown fences, or extra commentary.
@@ -383,39 +385,109 @@ def make_planner_node(tools):
     )
 
     def _parse_plan_with_retries(raw: str, user_query: str, config: RunnableConfig) -> Plan:
+        def dbg(msg: str) -> None:
+            if DEBUG_MESSAGES == 1:
+                print(f"[planner.parse] {msg}")
+
+        if not (raw or "").strip():
+            dbg("RAW output is empty.")
+
         # 1) try direct parse
         try:
-            return parser.parse(raw)
-        except Exception:
-            pass
+            plan = parser.parse(raw)
+            dbg("Direct parse: SUCCESS")
+            return plan
+        except Exception as e:
+            dbg(f"Direct parse: FAIL ({type(e).__name__}: {e})")
 
         # 2) try extracting JSON object and parsing that
         try:
             json_str = _extract_first_json_object(raw)
-            return parser.parse(json_str)
-        except Exception:
-            pass
+            plan = parser.parse(json_str)
+            dbg("Extract-first-JSON parse: SUCCESS")
+            return plan
+        except Exception as e:
+            dbg(f"Extract-first-JSON parse: FAIL ({type(e).__name__}: {e})")
 
         # 3) ask model to re-emit ONLY JSON (1 retry)
         repair_prompt = HumanMessage(
             content=(
-                "Your previous output was invalid.\n"
+                "Your previous output was invalid or empty.\n"
                 "Re-output ONLY the JSON object that matches the schema. No extra text.\n\n"
                 f"USER QUERY:\n{user_query}\n\n"
                 "Return ONLY JSON now."
             )
         )
-        repaired = model.invoke([system, repair_prompt], config=config).content
+        dbg("Requesting JSON repair (one retry).")
+
+        repaired_msg = model.invoke([system, repair_prompt], config=config)
+        repaired = (repaired_msg.content or "")
+        dbg(f"Repair raw length: {len(repaired.strip())}")
+
+        if DEBUG_MESSAGES == 1:
+            print("------------------------------------------------------------")
+            print("PLANNER REPAIR RAW OUTPUT")
+            print("------------------------------------------------------------")
+            print(repaired)
+            print("------------------------------------------------------------")
+
         try:
             json_str = _extract_first_json_object(repaired)
-            return parser.parse(json_str)
+            plan = parser.parse(json_str)
+            dbg("Repair parse: SUCCESS")
+            return plan
         except Exception as e:
-            # 4) last-resort fallback: 1-step plan
-            return Plan(steps=[f"Answer the user query directly: {user_query}"])
+            dbg(f"Repair parse: FAIL ({type(e).__name__}: {e})")
+
+        # 4) last-resort fallback: 1-step plan
+        dbg("FALLBACK: Using 1-step plan.")
+        return Plan(steps=[f"Answer the user query directly: {user_query}"])
+
+
 
     def planner_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
-        raw = model.invoke([system, HumanMessage(content=state["user_query"])], config=config).content
+        user_query = state["user_query"]
+
+        # Build planner input
+        planner_input = [system, HumanMessage(content=user_query)]
+
+        # Call model
+        raw = ""
+        for attempt in range(3):
+            raw = (model.invoke(planner_input, config=config).content or "").strip()
+            if raw:
+                break
+            if DEBUG_MESSAGES == 1:
+                print(f"[planner] Empty output attempt {attempt+1}/3")
+
+
+        # Debug: show planner input + raw output
+        if DEBUG_MESSAGES == 1:
+            print("\n\n============================================================")
+            print("PLANNER INPUT")
+            print("------------------------------------------------------------")
+            for i, m in enumerate(planner_input):
+                print(f"\n--- msg[{i}] ---")
+                print(format_msg(m))
+
+            print("\n------------------------------------------------------------")
+            print("PLANNER RAW OUTPUT")
+            print("------------------------------------------------------------")
+            print(raw)
+            print("============================================================\n")
+
         plan_obj = _parse_plan_with_retries(raw, state["user_query"], config)
+
+
+        # Debug: show parsed steps
+        if DEBUG_MESSAGES == 1:
+            print("------------------------------------------------------------")
+            print("PLANNER PARSED STEPS")
+            print("------------------------------------------------------------")
+            for i, step in enumerate(plan_obj.steps):
+                print(f"[{i}] {step}")
+            print("============================================================\n")
+
 
         return {
             "plan": plan_obj.steps,
@@ -647,7 +719,7 @@ def summarize_step_transcript_llm(
         if summary:
             return summary
     except Exception as e:
-        if os.getenv("DEBUG_MESSAGES", "0") == "1":
+        if DEBUG_MESSAGES == 1:
             print(f"[summarizer error] {e}")
 
     # Safe fallback
@@ -697,7 +769,7 @@ def make_advance_node(summarizer: BaseChatModel):
 
 
         # DEBUG: print exactly what you want
-        if os.getenv("DEBUG_MESSAGES", "0") == "1":
+        if DEBUG_MESSAGES == 1:
             print("\n\n============================================================")
             print(f"STEP-[{idx}] {step}")
             print("------------------------------------------------------------")
@@ -887,7 +959,6 @@ async def build_graph():
 # Run
 # ----------------------------
 async def main():
-    print("DEBUG_MESSAGES =", os.getenv("DEBUG_MESSAGES"))
 
     start_time = time.time()
     graph = await build_graph()
