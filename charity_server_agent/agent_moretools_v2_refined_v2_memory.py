@@ -372,6 +372,11 @@ def make_assistant_node(tools):
         "   Be concise, structured, and factual.\n"
     )
 
+    # Print base prompt once (optional)
+    print("Base SystemPrompt:")
+    console = Console()
+    console.print(Markdown(BASE_SYSTEM_PROMPT_TEXT))
+    print("\n\n---\n\n")
 
     def assistant_node(state: AgentState, config: RunnableConfig):
         sys_text = state.get("system_prompt") or BASE_SYSTEM_PROMPT_TEXT
