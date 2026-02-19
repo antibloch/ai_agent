@@ -348,7 +348,7 @@ def make_assistant_node(tools):
         response = model.invoke([SYSTEM_PROMPT] + list(state["messages"]), config=config)
         return {"messages": [response]}
 
-    return assistant_node
+    return assistant_node, SYSTEM_PROMPT
 
 
 
@@ -356,8 +356,10 @@ async def build_graph():
     tools = await setup_tools()
     tools = patch_tool_descriptions(tools)
 
+    assistant_node, system_prompt = make_assistant_node(tools)
+
     workflow = StateGraph(AgentState)
-    workflow.add_node("assistant", make_assistant_node(tools))
+    workflow.add_node("assistant", assistant_node)
     workflow.add_node("tools", ToolNode(tools))
 
     workflow.add_edge(START, "assistant")
@@ -370,7 +372,8 @@ async def build_graph():
     )
 
     workflow.add_edge("tools", "assistant")
-    return workflow.compile()
+    graph = workflow.compile()
+    return graph, system_prompt
 
 
 
@@ -396,7 +399,11 @@ def format_message(m: BaseMessage) -> str:
 # ----------------------------
 async def main():
     start_time = time.time()
-    graph = await build_graph()
+    graph, system_prompt = await build_graph()
+
+    print("\n--- SYSTEM PROMPT ---\n")
+    print(format_message(system_prompt))
+    print("---------------------\n")
 
 
     query = (
