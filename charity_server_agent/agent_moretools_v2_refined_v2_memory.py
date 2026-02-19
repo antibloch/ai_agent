@@ -316,24 +316,33 @@ def get_last_final_ai_text(messages: Sequence[BaseMessage]) -> str:
     return ""
 
 
-def build_system_prompt_with_last_turn(base_system_prompt: str, prev_user_query: str, prev_final_answer: str) -> str:
+def build_system_prompt_with_history(base_system_prompt: str, history: List[Tuple[str, str]]) -> str:
     """
-    Inject ONLY (prev_user_query, prev_final_answer) into the system prompt.
+    Inject ALL prior (user_query, final_answer) pairs into the system prompt.
     No full transcript is provided.
     """
-    prev_user_query = (prev_user_query or "").strip()
-    prev_final_answer = (prev_final_answer or "").strip()
+    if not history:
+        return base_system_prompt
+
+    blocks = []
+    for i, (q, a) in enumerate(history, start=1):
+        q = (q or "").strip()
+        a = (a or "").strip()
+        blocks.append(
+            f"\n---\n"
+            f"Turn #{i}\n"
+            f"Previous user query:\n{q}\n\n"
+            f"Your previous final answer:\n{a}\n"
+        )
 
     injection = (
         "\n\n"
         "PAST TURN CONTEXT (for continuity; not a full transcript):\n"
-        f"- Previous user query:\n{prev_user_query}\n"
-        f"- Your previous final answer:\n{prev_final_answer}\n"
-        "\n"
+        + "".join(blocks) +
+        "\n---\n"
         "Use this context to stay consistent. Do NOT mention this block unless the user asks.\n"
     )
     return base_system_prompt + injection
-
 
 
 def make_assistant_node(tools):
@@ -371,12 +380,6 @@ def make_assistant_node(tools):
         "   Provide a direct answer to EACH part of the query.\n"
         "   Be concise, structured, and factual.\n"
     )
-
-    # Print base prompt once (optional)
-    print("Base SystemPrompt:")
-    console = Console()
-    console.print(Markdown(BASE_SYSTEM_PROMPT_TEXT))
-    print("\n\n---\n\n")
 
     def assistant_node(state: AgentState, config: RunnableConfig):
         sys_text = state.get("system_prompt") or BASE_SYSTEM_PROMPT_TEXT
@@ -429,15 +432,20 @@ def format_message(m: BaseMessage) -> str:
     return f"{role}:\n{content}\n"
 
 
+def print_system_prompt_for_run(run_label: str, system_prompt_text: str):
+    console = Console()
+    print("\n--- SYSTEM PROMPT " + run_label + " ---\n")
+    console.print(Markdown(system_prompt_text))
+    print("\n--------------------------\n")
+
+
 # ----------------------------
 # 7) Run
 # ----------------------------
-async def run_one_query(graph, system_prompt_text: str, query: str) -> Tuple[List[BaseMessage], str]:
-    """
-    Runs a single graph invocation with a given system prompt and returns:
-      - all messages produced in this invocation
-      - the final AI answer text
-    """
+async def run_one_query(graph, system_prompt_text: str, query: str, run_label: str = "") -> Tuple[List[BaseMessage], str]:
+    # Print prompt ONCE per run
+    print_system_prompt_for_run(run_label or "", system_prompt_text)
+
     inputs = {
         "system_prompt": system_prompt_text,
         "messages": [HumanMessage(content=query)],
@@ -459,49 +467,53 @@ async def run_one_query(graph, system_prompt_text: str, query: str) -> Tuple[Lis
     return last_msgs, final_text
 
 
+
 async def main():
     start_time = time.time()
     graph, base_system_prompt_text = await build_graph()
 
-    # -------------------------
-    # Query #1
-    # -------------------------
-    query1 = (
-        "Find me all available charities, "
-        "Which charities have the highest donor count, "
-        "What are the mean and median of donor counts across charities, please calculate using python if needed."
-    )
+    # You control how many runs and what queries:
+    queries = [
+        (
+            "Find me all available charities, "
+            "Which charities have the highest donor count, "
+            "What are the mean and median of donor counts across charities, please calculate using python if needed."
+        ),
+        "Now summarize what has been done so far.",
+        # "Third query here...",
+        # "Fourth query here...",
+    ]
 
-    print("\n====================")
-    print("RUN #1")
-    print("====================\n")
-    msgs1, final1 = await run_one_query(graph, base_system_prompt_text, query1)
+    history: List[Tuple[str, str]] = []  # [(user_query, final_answer), ...]
 
     console = Console()
-    print("\nAgent Final Response (Run #1):\n-----------------------")
-    console.print(Markdown(final1))
 
-    # -------------------------
-    # Query #2 (inject only (query1, final1) into System prompt)
-    # -------------------------
-    query2 = (
-        "Now based on the charities you found, list each charity with its address "
-        "and briefly suggest which one is best for a donor who wants maximum reach."
-    )
+    for run_idx, query in enumerate(queries, start=1):
+        run_label = f"RUN #{run_idx}"
 
-    system_prompt_round2 = build_system_prompt_with_last_turn(
-        base_system_prompt_text,
-        prev_user_query=query1,
-        prev_final_answer=final1,
-    )
+        # For run #1, system prompt is base only.
+        # For run #k (k>1), inject ALL previous turns.
+        system_prompt_this_run = build_system_prompt_with_history(
+            base_system_prompt_text,
+            history=history,  # all prior runs only
+        )
 
-    print("\n====================")
-    print("RUN #2 (with injected last turn only)")
-    print("====================\n")
-    msgs2, final2 = await run_one_query(graph, system_prompt_round2, query2)
+        print("\n====================")
+        print(run_label)
+        print("====================\n")
 
-    print("\nAgent Final Response (Run #2):\n-----------------------")
-    console.print(Markdown(final2))
+        msgs, final = await run_one_query(
+            graph,
+            system_prompt_this_run,
+            query,
+            run_label=run_label
+        )
+
+        print(f"\nAgent Final Response ({run_label}):\n-----------------------")
+        console.print(Markdown(final))
+
+        # Append THIS run's (query, final answer) so it appears in the next run's prompt
+        history.append((query, final))
 
     elapsed = time.time() - start_time
     print(f"\n\n**Total elapsed time**: {elapsed:.2f} seconds")
