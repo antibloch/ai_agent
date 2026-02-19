@@ -336,6 +336,12 @@ def make_assistant_node(tools):
                             "   Be concise, structured, and factual.\n"
                             )
                         )
+    
+
+    print("SystemPrompt:")
+    console = Console()
+    console.print(Markdown(SYSTEM_PROMPT.content))
+    print("\n\n---\n\n")
 
 
     def assistant_node(state: AgentState, config: RunnableConfig):
