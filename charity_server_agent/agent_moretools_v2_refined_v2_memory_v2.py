@@ -70,6 +70,33 @@ def make_model_chat(temperature: float, bind_tools: Optional[list] = None, choic
         if bind_tools:
             chat = chat.bind_tools(bind_tools)
 
+    elif choice == "nvidia":
+        chat = ChatOpenAI(
+                # Point to NVIDIA instead of OpenAI
+                base_url="https://integrate.api.nvidia.com/v1", 
+                
+                # Pass your NVIDIA key
+                api_key=os.getenv("NVIDIA_API_KEY"), 
+                
+                # model="openai/gpt-oss-120b",
+
+                # model= "openai/gpt-oss-20b", 
+
+                # model="nv-mistralai/mistral-nemo-12b-instruct",
+
+                # model="mistralai/mistral-nemotron",
+
+                # model = "mistralai/mistral-large-3-675b-instruct-2512",
+
+                model = "nvidia/nemotron-3-nano-30b-a3b",
+                
+                temperature=0.0,
+                
+                max_tokens=8192
+            )
+        if bind_tools:
+            chat = chat.bind_tools(bind_tools)
+
     else:
         raise ValueError(f"Invalid model choice: {choice}")
     return chat
