@@ -41,6 +41,12 @@ from langchain_core.language_models.chat_models import BaseChatModel
 
 
 
+MAX_EMPTY_TOOL_RETRIES = 2
+
+
+
+
+
 def make_model_chat(temperature: float, bind_tools: Optional[list] = None, choice: str="ollama") -> BaseChatModel:
     if choice == "openrouter":
         api_key = os.getenv("OPENROUTER_API_KEY")
@@ -388,27 +394,8 @@ def make_assistant_node(tools):
 
 
 
-def make_retry_assistant_node(model, base_system_prompt_text: str, max_retries: int = 2):
-    def retry_node(state: AgentState, config: RunnableConfig):
-        retries = int(state.get("empty_tool_retries", 0))
-        if retries >= max_retries:
-            # Stop retrying; let normal flow continue/end
-            return {}
-
-        sys_text = state.get("system_prompt") or base_system_prompt_text
-        system_msg = SystemMessage(content=sys_text)
-
-        # Re-ask the model given the same context; model should decide what to do
-        response = model.invoke([system_msg] + list(state["messages"]), config=config)
-
-        return {
-            "empty_tool_retries": retries + 1,
-            "messages": [response],
-        }
-    return retry_node
 
 
-MAX_EMPTY_TOOL_RETRIES = 2
 
 def make_retry_empty_tool_node(model, base_system_prompt_text: str):
     def retry_empty_tool_node(state: AgentState, config: RunnableConfig):
@@ -470,10 +457,28 @@ async def build_graph():
     )
 
     # tools -> retry if last ToolMessage empty, else assistant
+    # Reset retry counter after successful tool output
     def route_after_tools(state: AgentState) -> str:
-        if last_tool_was_empty(state):
+        msgs = list(state.get("messages", []))
+
+        # find most recent ToolMessage
+        last_tool = None
+        for m in reversed(msgs):
+            if isinstance(m, ToolMessage):
+                last_tool = m
+                break
+
+        if last_tool is None:
+            return "assistant"
+
+        if len((last_tool.content or "").strip()) == 0:
             return "retry_empty_tool"
+
+        # SUCCESS path: reset retries so a later empty tool can retry again
+        state["empty_tool_retries"] = 0
         return "assistant"
+    
+    
 
     workflow.add_conditional_edges(
         "tools",
@@ -500,11 +505,14 @@ def is_empty_tool_message(m: BaseMessage) -> bool:
     content = (getattr(m, "content", "") or "")
     return len(content.strip()) == 0
 
+
+
 def last_tool_was_empty(state: AgentState) -> bool:
     msgs = list(state.get("messages", []))
-    if not msgs:
-        return False
-    return is_empty_tool_message(msgs[-1])
+    for m in reversed(msgs):
+        if isinstance(m, ToolMessage):
+            return len((m.content or "").strip()) == 0
+    return False
 
 
 def format_message(m: BaseMessage) -> str:
@@ -514,18 +522,16 @@ def format_message(m: BaseMessage) -> str:
     if isinstance(m, AIMessage):
         tool_calls = getattr(m, "tool_calls", None)
         if tool_calls:
-            content += "\n\n[tool_calls]\n" + json.dumps(tool_calls, indent=2)
+            content = (content + "\n\n" if content else "") + "[tool_calls]\n" + json.dumps(tool_calls, indent=2)
 
     if isinstance(m, ToolMessage):
         tool_name = getattr(m, "name", None)
+        raw = (getattr(m, "content", "") or "")
+        shown = raw if raw.strip() else "<EMPTY TOOL OUTPUT>"
         if tool_name:
-            content = f"[tool={tool_name}]\n{content}"
-
-    if isinstance(m, ToolMessage):
-        tool_name = getattr(m, "name", None)
-        c = (getattr(m, "content", "") or "")
-        if tool_name:
-            content = f"[tool={tool_name}]\n" + (c if c.strip() else "<EMPTY TOOL OUTPUT>")
+            content = f"[tool={tool_name}]\n{shown}"
+        else:
+            content = shown
 
     return f"{role}:\n{content}\n"
 
