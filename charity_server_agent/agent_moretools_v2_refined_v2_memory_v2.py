@@ -115,8 +115,6 @@ def textual_description_of_tools(tools) -> str:
 class AgentState(TypedDict):
     system_prompt: str
     messages: Annotated[Sequence[BaseMessage], add_messages]
-
-    # retry bookkeeping
     empty_tool_retries: int
 
 
@@ -410,12 +408,52 @@ def make_retry_assistant_node(model, base_system_prompt_text: str, max_retries: 
     return retry_node
 
 
+MAX_EMPTY_TOOL_RETRIES = 2
+
+def make_retry_empty_tool_node(model, base_system_prompt_text: str):
+    def retry_empty_tool_node(state: AgentState, config: RunnableConfig):
+        retries = int(state.get("empty_tool_retries", 0))
+        if retries >= MAX_EMPTY_TOOL_RETRIES:
+            print(f"[RETRY] Skipping: reached MAX_EMPTY_TOOL_RETRIES={MAX_EMPTY_TOOL_RETRIES}")
+            return {}
+
+        msgs = list(state.get("messages", []))
+        last = msgs[-1] if msgs else None
+
+        # Extra safety: only retry if last message is truly an empty ToolMessage
+        if not (isinstance(last, ToolMessage) and len((last.content or "").strip()) == 0):
+            return {}
+
+        print(f"[RETRY] Detected EMPTY ToolMessage. Retrying assistant (attempt {retries+1}/{MAX_EMPTY_TOOL_RETRIES})")
+
+        # Strong nudge so it re-runs Python tool and PRINTS the final result
+        retry_hint = HumanMessage(
+            content=(
+                "The previous tool returned EMPTY output. "
+                "If you call Python_REPL again, you MUST end with print(...) "
+                "so the tool returns visible output. Re-run the necessary tool call."
+            )
+        )
+
+        sys_text = state.get("system_prompt") or base_system_prompt_text
+        system_msg = SystemMessage(content=sys_text)
+
+        response = model.invoke([system_msg] + msgs + [retry_hint], config=config)
+
+        return {
+            "empty_tool_retries": retries + 1,
+            "messages": [response],
+        }
+
+    return retry_empty_tool_node
+
+
 async def build_graph():
     tools = await setup_tools()
     tools = patch_tool_descriptions(tools)
 
     assistant_node, base_system_prompt_text, model = make_assistant_node(tools)
-    retry_node = make_retry_assistant_node(model, base_system_prompt_text, max_retries=2)
+    retry_node = make_retry_empty_tool_node(model, base_system_prompt_text)
 
     workflow = StateGraph(AgentState)
     workflow.add_node("assistant", assistant_node)
@@ -431,7 +469,7 @@ async def build_graph():
         {"tools": "tools", END: END},
     )
 
-    # tools -> (retry if empty ToolMessage) else assistant
+    # tools -> retry if last ToolMessage empty, else assistant
     def route_after_tools(state: AgentState) -> str:
         if last_tool_was_empty(state):
             return "retry_empty_tool"
@@ -443,7 +481,7 @@ async def build_graph():
         {"retry_empty_tool": "retry_empty_tool", "assistant": "assistant"},
     )
 
-    # retry -> tools if it tool_calls else END/assistant depending on tools_condition
+    # retry -> tools if tool_calls else END (or assistant; tools_condition will choose END when no tool_calls)
     workflow.add_conditional_edges(
         "retry_empty_tool",
         tools_condition,
@@ -482,6 +520,12 @@ def format_message(m: BaseMessage) -> str:
         tool_name = getattr(m, "name", None)
         if tool_name:
             content = f"[tool={tool_name}]\n{content}"
+
+    if isinstance(m, ToolMessage):
+        tool_name = getattr(m, "name", None)
+        c = (getattr(m, "content", "") or "")
+        if tool_name:
+            content = f"[tool={tool_name}]\n" + (c if c.strip() else "<EMPTY TOOL OUTPUT>")
 
     return f"{role}:\n{content}\n"
 
