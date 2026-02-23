@@ -492,20 +492,27 @@ def make_planner_node(tools):
 
         # IMPORTANT: build via concatenation to avoid `.format()` brace collisions
         planner_system_text = (
-            "You are a planner. Break the user's request into a short sequence of steps.\n"
-            "Rules:\n"
-            "- Return ONLY a JSON object. No markdown, no code fences, no <think>.\n"
-            "- The JSON must match the schema exactly.\n"
-            "- Steps should be concrete, ordered, and cover ALL parts of the request.\n"
-            "\n"
-            + parser.get_format_instructions()
-            + "\n\n"
-            "PAST_CONTEXT (previous turns; use only if relevant):\n"
-            + past_context_text
-            + "\n\n"
-            "AVAILABLE TOOLS:\n"
-            + tools_description
-        )
+                "You are a planner. Your ONLY job is to break the user's request into "
+                "the MINIMAL number of concrete, executable steps for the executor.\n\n"
+                "CRITICAL RULES (follow strictly):\n"
+                "- Use the FEWEST steps possible. Prefer 1 step for simple or summarization requests.\n"
+                "- Maximum 3 steps. Never create more than 3.\n"
+                "- The finalizer node will automatically compile ALL step results into the final user answer.\n"
+                "- Therefore, NEVER add a step that says 'summarize', 'compile', 'combine', 'return the final answer', "
+                "'produce the overall result', or similar. The last step must be a concrete action that produces data or a clear result.\n"
+                "- For queries that are purely about summarizing previous conversation or context "
+                "(e.g. 'Summarize previous conversation', 'Summarize what we discussed'), "
+                "ALWAYS use EXACTLY ONE step: 'Summarize the provided PAST_CONTEXT and any relevant context_summaries.'\n"
+                "- Steps must be concrete and actionable by the executor (e.g. 'Fetch charity data using get_charity_stats', "
+                "'Calculate mean and median using Python REPL', 'Extract key facts from the page').\n\n"
+                + parser.get_format_instructions()
+                + "\n\n"
+                "PAST_CONTEXT (previous conversation turns — already summarized; use only if relevant):\n"
+                + past_context_text
+                + "\n\n"
+                "AVAILABLE TOOLS:\n"
+                + tools_description
+            )
         planner_system = SystemMessage(content=planner_system_text)
 
         # exec_system still uses `.format()` safely because it contains no JSON braces
