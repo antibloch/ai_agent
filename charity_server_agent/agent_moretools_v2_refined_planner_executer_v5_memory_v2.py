@@ -584,19 +584,40 @@ def make_reflection_node(tools):
     tools_description = textual_description_of_tools(tools)
 
     REFLECTION_SYSTEM_TEXT = (
-        "You are a plan reflection and hallucination-correction agent.\n"
-        "Your ONLY job is to review the planner's proposed steps and fix any hallucinations or wrong information.\n\n"
+        "You are a strict plan validator and corrector. "
+        "Your ONLY job is to detect and fix hallucinations while preserving the original intent and number of steps.\n\n"
         "CRITICAL RULES (follow strictly):\n"
-        "- Tool names MUST be exactly one of the AVAILABLE TOOLS listed below. If a step uses a wrong/non-existent tool name, correct it to the exact valid name or rephrase the step to use a valid tool.\n"
-        "- Do not invent new tools.\n"
-        "- Fix any logical errors, impossible actions, or wrong assumptions.\n"
-        "- Keep the number of steps the same or fewer.\n"
-        "- Preserve the original intent.\n"
-        "- If the plan is already correct, return it unchanged.\n\n"
+        "- Tool names that appear in any step MUST be exactly one of the AVAILABLE TOOLS listed below. "
+        "No other names are allowed.\n"
+        "- SPECIAL CASE — get_charity_stats:\n"
+        "  The names charity_donor_count, charity_impactlife, charity_donor_amount, … are NOT tools.\n"
+        "  They are arguments to the tool get_charity_stats.\n"
+        "  CORRECT phrasing:\n"
+        "    \"Use get_charity_stats with the exact argument 'charity_donor_count' to fetch donor count data for all charities.\"\n"
+        "  INCORRECT (do NOT allow):\n"
+        "    \"Use charity_donor_count\", \"Call charity_donor_count tool\", \"get_charity_stats('charity_donor_count')\" as a single tool.\n"
+        "- For any calculation, statistics, mean/median, etc. → the step MUST use Python_REPL.\n"
+        "- Maintain the exact original number of steps. "
+        "Only merge or delete a step if it is completely redundant or impossible. "
+        "Never drop a calculation or data-fetch step.\n"
+        "- Make the smallest possible change. If the original plan is already correct, return it unchanged.\n\n"
         + PydanticOutputParser(pydantic_object=Plan).get_format_instructions()
         + "\n\n"
-        "AVAILABLE TOOLS (use ONLY these exact names):\n"
+        "AVAILABLE TOOLS:\n"
         + tools_description
+        + "\n\n"
+        "FEW-SHOT EXAMPLES:\n"
+        "Original plan:\n"
+        '  ["Use get_charity_stats with the exact tool name \'charity_donor_count\' to fetch donor count data.",\n'
+        '   "In Python_REPL, load the data, compute mean/median and highest donor charities."]\n'
+        "Corrected (only tiny fix if needed):\n"
+        '  ["Use get_charity_stats with the exact argument \'charity_donor_count\' to fetch donor count data for all charities.",\n'
+        '   "In Python_REPL, load the returned data, compute the mean and median of donor counts, identify the charities with the highest donor count, and print a JSON object."]\n\n'
+        "Original plan:\n"
+        '  ["charity_donor_count", "import json..."]\n'
+        "Corrected:\n"
+        '  ["Use get_charity_stats with argument \'charity_donor_count\' to fetch donor count data for all charities.",\n'
+        '   "Use Python_REPL to load the data and compute mean, median, and top charities."]\n'
     )
 
     def reflection_node(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
