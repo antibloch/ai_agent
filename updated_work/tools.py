@@ -448,3 +448,12 @@ Arguments:
 {args_text}
 """)
     return "\n\n".join(blocks)
+
+
+
+if __name__ == "__main__":
+    import asyncio
+    tools = asyncio.run(setup_tools())
+    print("Available tools:")
+    for t in tools:
+        print(f"  • {t.name}")

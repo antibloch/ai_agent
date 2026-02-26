@@ -146,13 +146,24 @@ def make_validator_node(tools_by_name: dict):
 
 
 def make_executor_node(tools_by_name: dict):
-    def _invoke_tool(tool, raw_args: dict):
+    async def _invoke_tool(tool, raw_args: dict):
+        # Prefer async if the tool supports it
+        if hasattr(tool, "ainvoke"):
+            # Some tools have ainvoke but it's not a coroutine function → still try
+            result = await tool.ainvoke(raw_args)
+            return result
+
+        # Fallback to sync invoke
         if getattr(tool, "args_schema", None) is not None:
             return tool.invoke(raw_args)
+
         if not raw_args:
             return tool.invoke("")
+
         if len(raw_args) == 1:
             return tool.invoke(next(iter(raw_args.values())))
+
+        # fallback for tools that expect a string
         return tool.invoke(json.dumps(raw_args, ensure_ascii=False))
 
     def _looks_like_error_text(s: str) -> bool:
@@ -190,7 +201,7 @@ def make_executor_node(tools_by_name: dict):
     def _mk_tool_call(tool_name: str, args: dict, tool_call_id: str) -> dict:
         return {"name": tool_name, "args": args or {}, "id": tool_call_id, "type": "tool_call"}
 
-    def executor_node(state: dict) -> Dict:
+    async def executor_node(state: dict) -> Dict:
         plan = state.get("plan", {})
         steps = plan.get("steps", [])
         if not steps:
@@ -211,10 +222,18 @@ def make_executor_node(tools_by_name: dict):
             messages.append(AIMessage(content="", tool_calls=[_mk_tool_call(tool_name, raw_args, tool_call_id)]))
 
             try:
-                result = _invoke_tool(tool, raw_args)
+                # This is the key change: we now await the invocation
+                result = await _invoke_tool(tool, raw_args)
                 payload = _normalize_result(tool_name, result)
+
             except Exception as e:
-                payload = {"ok": False, "error": str(e), "tool": tool_name, "args": raw_args}
+                error_msg = str(e)
+                payload = {
+                    "ok": False,
+                    "error": error_msg,
+                    "tool": tool_name,
+                    "args": raw_args
+                }
 
             messages.append(ToolMessage(
                 content=json.dumps(payload, ensure_ascii=False, default=str),
