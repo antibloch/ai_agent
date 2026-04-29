@@ -12,9 +12,10 @@ from langchain_ollama import ChatOllama  # <- Ollama chat model
 
 from maxim import Maxim
 from maxim.logger.langchain import MaximLangchainTracer
-
-maxim = Maxim({"api_key": "sk_mx_mljficn7_pAuCdvzBOUBixPJx8LjseUdpVVCb5rS9"})
-logger = maxim.logger({"id": "cmlji9tw100ne1zsizyg6fqj5"})
+maxim_api_key=""
+id_key=""
+maxim = Maxim({"api_key": maxim_api_key})
+logger = maxim.logger({"id": id_key})
 
 
 def build_tools():
